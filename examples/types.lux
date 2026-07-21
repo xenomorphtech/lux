@@ -1,0 +1,38 @@
+// Test type check functions
+mod types
+
+fn main() -> () {
+    // Integer checks
+    print(is_int(42))
+    print(is_int(3.14))
+
+    // Float checks
+    print(is_float(3.14))
+    print(is_float(42))
+
+    // Number (int or float)
+    print(is_number(42))
+    print(is_number(3.14))
+    print(is_number("hello"))
+
+    // Atom checks
+    print(is_atom(:hello))
+    print(is_atom(42))
+
+    // List checks
+    print(is_list([1, 2, 3]))
+    print(is_list((1, 2)))
+
+    // Tuple checks
+    print(is_tuple((1, 2, 3)))
+    print(is_tuple([1, 2]))
+
+    // Map checks
+    print(is_map(%{:a => 1}))
+    print(is_map([]))
+
+    // Boolean checks
+    print(is_bool(true))
+    print(is_bool(false))
+    print(is_bool(1))
+}

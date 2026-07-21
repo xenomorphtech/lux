@@ -1,0 +1,11 @@
+// Simple test file for self-hosted compiler
+mod test_simple
+
+fn greet(name: String) -> String {
+    str_concat("Hello, ", str_concat(name, "!"))
+}
+
+fn main() -> () {
+    let msg = greet("World")
+    print(msg)
+}

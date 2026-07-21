@@ -1,0 +1,25 @@
+[package]
+name = "lux"
+version = "0.1.0"
+edition = "2024"
+default-run = "lux"
+
+[dependencies]
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.218", features = ["derive"] }
+serde_json = "1.0.139"
+sha2 = "0.10.9"
+chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
+tiny_http = "0.12.0"
+ureq = { version = "2.12.1", features = ["json"] }
+
+# Cranelift native code generation
+cranelift-codegen = "0.130.0"
+cranelift-frontend = "0.130.0"
+cranelift-module = "0.130.0"
+cranelift-native = "0.130.0"
+cranelift-object = "0.130.0"
+target-lexicon = "0.13.5"
+
+[dev-dependencies]
+tempfile = "3.17.1"

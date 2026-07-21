@@ -1,0 +1,606 @@
+// Lexer for the Lux self-hosted compiler
+mod lexer
+
+// Span represents source location
+struct Span {
+    start: Int,
+    end_pos: Int
+}
+
+// Token kinds (simplified for initial implementation)
+enum TokenKind {
+    TokInt(Int),
+    TokChar(Int),
+    TokString(String),
+    TokAtom(String),
+    TokBool(Bool),
+    TokIdent(String),
+    TokTypeIdent(String),
+    TokFn,
+    TokLet,
+    TokIf,
+    TokElse,
+    TokMatch,
+    TokEnum,
+    TokStruct,
+    TokType,
+    TokMod,
+    TokUse,
+    TokCond,
+    TokFor,
+    TokIn,
+    TokExtern,
+    TokPlus,
+    TokPlusPlus,
+    TokMinus,
+    TokStar,
+    TokSlash,
+    TokPercent,
+    TokEq,
+    TokEqEq,
+    TokNotEq,
+    TokLt,
+    TokLtEq,
+    TokGt,
+    TokGtEq,
+    TokArrow,
+    TokFatArrow,
+    TokPipe,
+    TokOr,
+    TokAnd,
+    TokColon,
+    TokColon2,
+    TokLParen,
+    TokRParen,
+    TokLBrace,
+    TokRBrace,
+    TokLBracket,
+    TokRBracket,
+    TokComma,
+    TokDot,
+    TokEof,
+    TokError(String),
+}
+
+struct Token {
+    kind: TokenKind,
+    span: Span
+}
+
+// Option type
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// Lexer state: (chars, pos) where chars is list of char codes
+struct LexState {
+    chars: List<Int>,
+    pos: Int
+}
+
+// Character predicates
+fn is_whitespace(c: Int) -> Bool {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+fn is_digit(c: Int) -> Bool {
+    c >= '0' && c <= '9'
+}
+
+fn is_alpha(c: Int) -> Bool {
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+fn is_lower(c: Int) -> Bool {
+    c >= 'a' && c <= 'z'
+}
+
+fn is_upper(c: Int) -> Bool {
+    c >= 'A' && c <= 'Z'
+}
+
+fn is_alnum(c: Int) -> Bool {
+    is_alpha(c) || is_digit(c) || c == '_'
+}
+
+// Peek at current character without consuming
+fn peek(state: LexState) -> Option<Int> {
+    match state.chars {
+        [] => Option::None,
+        [c | _] => Option::Some(c)
+    }
+}
+
+// Advance one character
+fn advance(state: LexState) -> LexState {
+    match state.chars {
+        [] => state,
+        [_ | rest] => LexState { chars: rest, pos: state.pos + 1 }
+    }
+}
+
+// Skip whitespace and comments
+fn skip_ws(state: LexState) -> LexState {
+    match peek(state) {
+        Option::None => state,
+        Option::Some(c) => {
+            if is_whitespace(c) {
+                skip_ws(advance(state))
+            } else if c == '/' {
+                // Check for // comment
+                match state.chars {
+                    ['/', '/' | rest] => skip_line_comment(LexState { chars: rest, pos: state.pos + 2 }),
+                    _ => state
+                }
+            } else {
+                state
+            }
+        }
+    }
+}
+
+// Skip until end of line
+fn skip_line_comment(state: LexState) -> LexState {
+    match peek(state) {
+        Option::None => state,
+        Option::Some(c) => {
+            if c == '\n' {
+                skip_ws(advance(state))
+            } else {
+                skip_line_comment(advance(state))
+            }
+        }
+    }
+}
+
+// Collect digits into a number
+fn collect_number(state: LexState, acc: Int) -> (Int, LexState) {
+    match peek(state) {
+        Option::None => (acc, state),
+        Option::Some(c) => {
+            if is_digit(c) {
+                collect_number(advance(state), acc * 10 + (c - '0'))
+            } else {
+                (acc, state)
+            }
+        }
+    }
+}
+
+// Collect identifier characters
+fn collect_ident(state: LexState, acc: List<Int>) -> (List<Int>, LexState) {
+    match peek(state) {
+        Option::None => (reverse(acc), state),
+        Option::Some(c) => {
+            if is_alnum(c) {
+                collect_ident(advance(state), [c | acc])
+            } else {
+                (reverse(acc), state)
+            }
+        }
+    }
+}
+
+// Reverse a list
+fn reverse(xs: List<Int>) -> List<Int> {
+    reverse_acc(xs, [])
+}
+
+fn reverse_acc(xs: List<Int>, acc: List<Int>) -> List<Int> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_acc(t, [h | acc])
+    }
+}
+
+// Collect string contents until closing quote
+fn collect_string(state: LexState, acc: List<Int>) -> (List<Int>, LexState) {
+    match peek(state) {
+        Option::None => (reverse(acc), state),
+        Option::Some(c) => {
+            if c == '"' {
+                (reverse(acc), advance(state))
+            } else if c == '\\' {
+                let s1 = advance(state)
+                match peek(s1) {
+                    Option::Some('n') => collect_string(advance(s1), ['\n' | acc]),
+                    Option::Some('t') => collect_string(advance(s1), ['\t' | acc]),
+                    Option::Some('r') => collect_string(advance(s1), ['\r' | acc]),
+                    Option::Some('"') => collect_string(advance(s1), ['"' | acc]),
+                    Option::Some('\\') => collect_string(advance(s1), ['\\' | acc]),
+                    Option::Some(x) => collect_string(advance(s1), [x | acc]),
+                    Option::None => (reverse(acc), s1)
+                }
+            } else {
+                collect_string(advance(state), [c | acc])
+            }
+        }
+    }
+}
+
+// Collect atom name
+fn collect_atom(state: LexState, acc: List<Int>) -> (List<Int>, LexState) {
+    match peek(state) {
+        Option::None => (reverse(acc), state),
+        Option::Some(c) => {
+            if is_alnum(c) {
+                collect_atom(advance(state), [c | acc])
+            } else {
+                (reverse(acc), state)
+            }
+        }
+    }
+}
+
+// Convert charlist to string (in Lux they are the same)
+// In Erlang, a list of integers IS a string, so this is identity
+fn chars_to_string(chars: List<Int>) -> String {
+    chars
+}
+
+// Check if identifier is a keyword
+fn check_keyword(chars: List<Int>) -> TokenKind {
+    let s = chars_to_string(chars)
+    match s {
+        "fn" => TokenKind::TokFn,
+        "let" => TokenKind::TokLet,
+        "if" => TokenKind::TokIf,
+        "else" => TokenKind::TokElse,
+        "match" => TokenKind::TokMatch,
+        "enum" => TokenKind::TokEnum,
+        "struct" => TokenKind::TokStruct,
+        "type" => TokenKind::TokType,
+        "mod" => TokenKind::TokMod,
+        "use" => TokenKind::TokUse,
+        "cond" => TokenKind::TokCond,
+        "for" => TokenKind::TokFor,
+        "in" => TokenKind::TokIn,
+        "extern" => TokenKind::TokExtern,
+        "true" => TokenKind::TokBool(true),
+        "false" => TokenKind::TokBool(false),
+        _ => TokenKind::TokIdent(s)
+    }
+}
+
+// Make a token
+fn make_tok(kind: TokenKind, start: Int, end_pos: Int) -> Token {
+    Token { kind: kind, span: Span { start: start, end_pos: end_pos } }
+}
+
+// Lex next token
+fn next_token(state: LexState) -> (Token, LexState) {
+    let s0 = skip_ws(state)
+    let start = s0.pos
+
+    match peek(s0) {
+        Option::None => (make_tok(TokenKind::TokEof, start, start), s0),
+        Option::Some(c) => {
+            // Single char tokens
+            if c == '(' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokLParen, start, s1.pos), s1)
+            } else if c == ')' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokRParen, start, s1.pos), s1)
+            } else if c == '{' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokLBrace, start, s1.pos), s1)
+            } else if c == '}' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokRBrace, start, s1.pos), s1)
+            } else if c == '[' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokLBracket, start, s1.pos), s1)
+            } else if c == ']' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokRBracket, start, s1.pos), s1)
+            } else if c == ',' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokComma, start, s1.pos), s1)
+            } else if c == '.' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokDot, start, s1.pos), s1)
+            } else if c == '+' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some(c2) => {
+                        if c2 == '+' {
+                            let s2 = advance(s1)
+                            (make_tok(TokenKind::TokPlusPlus, start, s2.pos), s2)
+                        } else {
+                            (make_tok(TokenKind::TokPlus, start, s1.pos), s1)
+                        }
+                    },
+                    Option::None => (make_tok(TokenKind::TokPlus, start, s1.pos), s1)
+                }
+            } else if c == '*' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokStar, start, s1.pos), s1)
+            } else if c == '/' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokSlash, start, s1.pos), s1)
+            } else if c == '%' {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokPercent, start, s1.pos), s1)
+            } else if c == '|' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('|') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokOr, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokPipe, start, s1.pos), s1)
+                }
+            } else if c == '&' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('&') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokAnd, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokError("Expected &&"), start, s1.pos), s1)
+                }
+            // Multi-char operators
+            } else if c == '-' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('>') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokArrow, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokMinus, start, s1.pos), s1)
+                }
+            } else if c == '=' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('=') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokEqEq, start, s2.pos), s2)
+                    },
+                    Option::Some('>') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokFatArrow, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokEq, start, s1.pos), s1)
+                }
+            } else if c == '!' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('=') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokNotEq, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokError("Expected !="), start, s1.pos), s1)
+                }
+            } else if c == '<' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('=') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokLtEq, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokLt, start, s1.pos), s1)
+                }
+            } else if c == '>' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some('=') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokGtEq, start, s2.pos), s2)
+                    },
+                    _ => (make_tok(TokenKind::TokGt, start, s1.pos), s1)
+                }
+            } else if c == ':' {
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some(':') => {
+                        let s2 = advance(s1)
+                        (make_tok(TokenKind::TokColon2, start, s2.pos), s2)
+                    },
+                    Option::Some(x) => {
+                        if is_alpha(x) {
+                            // Atom literal :name
+                            let (chars, s2) = collect_atom(s1, [])
+                            let name = chars_to_string(chars)
+                            (make_tok(TokenKind::TokAtom(name), start, s2.pos), s2)
+                        } else {
+                            (make_tok(TokenKind::TokColon, start, s1.pos), s1)
+                        }
+                    },
+                    Option::None => (make_tok(TokenKind::TokColon, start, s1.pos), s1)
+                }
+            // String
+            } else if c == '"' {
+                let s1 = advance(s0)
+                let (chars, s2) = collect_string(s1, [])
+                let str = chars_to_string(chars)
+                (make_tok(TokenKind::TokString(str), start, s2.pos), s2)
+            // Character literal 'x' or '\n'
+            } else if c == 39 {  // single quote
+                let s1 = advance(s0)
+                match peek(s1) {
+                    Option::Some(ch) => {
+                        if ch == 92 {  // backslash - escape sequence
+                            let s2 = advance(s1)
+                            match peek(s2) {
+                                Option::Some(esc) => {
+                                    let s3 = advance(s2)
+                                    let char_val = if esc == 'n' { 10 }  // newline
+                                        else if esc == 't' { 9 }  // tab
+                                        else if esc == 'r' { 13 } // carriage return
+                                        else if esc == 92 { 92 }  // backslash
+                                        else if esc == 39 { 39 }  // single quote
+                                        else { esc }
+                                    match peek(s3) {
+                                        Option::Some(39) => {
+                                            let s4 = advance(s3)
+                                            (make_tok(TokenKind::TokChar(char_val), start, s4.pos), s4)
+                                        },
+                                        _ => (make_tok(TokenKind::TokError("Expected closing quote"), start, s3.pos), s3)
+                                    }
+                                },
+                                Option::None => (make_tok(TokenKind::TokError("Unexpected EOF in escape"), start, s2.pos), s2)
+                            }
+                        } else {
+                            // Regular character
+                            let s2 = advance(s1)
+                            match peek(s2) {
+                                Option::Some(39) => {
+                                    let s3 = advance(s2)
+                                    (make_tok(TokenKind::TokChar(ch), start, s3.pos), s3)
+                                },
+                                _ => (make_tok(TokenKind::TokError("Expected closing quote"), start, s2.pos), s2)
+                            }
+                        }
+                    },
+                    Option::None => (make_tok(TokenKind::TokError("Unexpected EOF in char"), start, s1.pos), s1)
+                }
+            // Number
+            } else if is_digit(c) {
+                let (num, s1) = collect_number(s0, 0)
+                (make_tok(TokenKind::TokInt(num), start, s1.pos), s1)
+            // Identifier (lowercase)
+            } else if is_lower(c) || c == '_' {
+                let (chars, s1) = collect_ident(s0, [])
+                let kind = check_keyword(chars)
+                (make_tok(kind, start, s1.pos), s1)
+            // Type identifier (uppercase)
+            } else if is_upper(c) {
+                let (chars, s1) = collect_ident(s0, [])
+                let name = chars_to_string(chars)
+                (make_tok(TokenKind::TokTypeIdent(name), start, s1.pos), s1)
+            } else {
+                let s1 = advance(s0)
+                (make_tok(TokenKind::TokError("Unexpected char"), start, s1.pos), s1)
+            }
+        }
+    }
+}
+
+// Tokenize entire source
+fn tokenize_loop(state: LexState, acc: List<Token>) -> List<Token> {
+    let (tok, new_state) = next_token(state)
+    match tok.kind {
+        TokenKind::TokEof => reverse_tokens([tok | acc]),
+        _ => tokenize_loop(new_state, [tok | acc])
+    }
+}
+
+fn reverse_tokens(xs: List<Token>) -> List<Token> {
+    reverse_tokens_acc(xs, [])
+}
+
+fn reverse_tokens_acc(xs: List<Token>, acc: List<Token>) -> List<Token> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_tokens_acc(t, [h | acc])
+    }
+}
+
+// Main tokenize function
+fn tokenize(source: String) -> List<Token> {
+    // Convert string to list of character codes
+    let state = LexState { chars: chars(source), pos: 0 }
+    tokenize_loop(state, [])
+}
+
+// Print token kind name
+fn token_name(kind: TokenKind) -> String {
+    match kind {
+        TokenKind::TokInt(_) => "Int",
+        TokenKind::TokChar(_) => "Char",
+        TokenKind::TokString(_) => "String",
+        TokenKind::TokAtom(_) => "Atom",
+        TokenKind::TokBool(_) => "Bool",
+        TokenKind::TokIdent(_) => "Ident",
+        TokenKind::TokTypeIdent(_) => "TypeIdent",
+        TokenKind::TokFn => "fn",
+        TokenKind::TokLet => "let",
+        TokenKind::TokIf => "if",
+        TokenKind::TokElse => "else",
+        TokenKind::TokMatch => "match",
+        TokenKind::TokEnum => "enum",
+        TokenKind::TokStruct => "struct",
+        TokenKind::TokType => "type",
+        TokenKind::TokMod => "mod",
+        TokenKind::TokUse => "use",
+        TokenKind::TokPlus => "+",
+        TokenKind::TokPlusPlus => "++",
+        TokenKind::TokMinus => "-",
+        TokenKind::TokStar => "*",
+        TokenKind::TokSlash => "/",
+        TokenKind::TokPercent => "%",
+        TokenKind::TokEq => "=",
+        TokenKind::TokEqEq => "==",
+        TokenKind::TokNotEq => "!=",
+        TokenKind::TokLt => "<",
+        TokenKind::TokLtEq => "<=",
+        TokenKind::TokGt => ">",
+        TokenKind::TokGtEq => ">=",
+        TokenKind::TokArrow => "->",
+        TokenKind::TokFatArrow => "=>",
+        TokenKind::TokPipe => "|",
+        TokenKind::TokOr => "||",
+        TokenKind::TokAnd => "&&",
+        TokenKind::TokColon => ":",
+        TokenKind::TokColon2 => "::",
+        TokenKind::TokLParen => "(",
+        TokenKind::TokRParen => ")",
+        TokenKind::TokLBrace => "{",
+        TokenKind::TokRBrace => "}",
+        TokenKind::TokLBracket => "[",
+        TokenKind::TokRBracket => "]",
+        TokenKind::TokComma => ",",
+        TokenKind::TokDot => ".",
+        TokenKind::TokEof => "EOF",
+        TokenKind::TokError(_) => "Error"
+    }
+}
+
+// Print token for debugging
+fn print_token(tok: Token) -> () {
+    let name = token_name(tok.kind)
+    let _ = print("${name} @ ${tok.span.start}-${tok.span.end_pos}")
+    ()
+}
+
+fn print_tokens(tokens: List<Token>) -> () {
+    match tokens {
+        [] => (),
+        [tok | rest] => {
+            let _ = print_token(tok)
+            print_tokens(rest)
+        },
+    }
+}
+
+// Test
+fn main() -> () {
+    let source1 = "fn main() -> Int { let x = 42 }"
+    print("Tokenizing: ${source1}")
+    print("---")
+    let tokens1 = tokenize(source1)
+    print_tokens(tokens1)
+
+    print("")
+    print("===")
+    print("")
+
+    let source2 = "enum Option<T> { Some(T), None }"
+    print("Tokenizing: ${source2}")
+    print("---")
+    let tokens2 = tokenize(source2)
+    print_tokens(tokens2)
+
+    print("")
+    print("===")
+    print("")
+
+    // Test atoms and strings
+    let source3 = "let x = :ok\nlet s = \"hello\""
+    print("Tokenizing: ${source3}")
+    print("---")
+    let tokens3 = tokenize(source3)
+    print_tokens(tokens3)
+}

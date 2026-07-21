@@ -1,0 +1,41 @@
+// Test built-in stdlib functions
+mod stdlib
+
+fn main() -> () {
+    let nums = [5, 2, 8, 1, 9, 3]
+
+    // length
+    print(length(nums))
+
+    // hd and tl
+    print(hd(nums))
+    print(tl(nums))
+
+    // reverse
+    print(reverse(nums))
+
+    // sort
+    print(sort(nums))
+
+    // max and min
+    print(max(10, 20))
+    print(min(10, 20))
+
+    // abs
+    print(abs(-42))
+
+    // append
+    print(append([1, 2], [3, 4]))
+
+    // flatten
+    print(flatten([[1, 2], [3, 4], [5]]))
+
+    // tuple helpers
+    let pair = (42, "hello")
+    print(fst(pair))
+    print(snd(pair))
+    print(size(pair))
+
+    // conversion
+    print(to_string(123))
+}

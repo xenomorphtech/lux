@@ -1,0 +1,34 @@
+// Test string and list functions
+mod strings
+
+fn main() -> () {
+    // String functions
+    let s = "  Hello, World!  "
+    print(str_length(s))
+    print(str_trim(s))
+    print(str_upper("hello"))
+    print(str_lower("HELLO"))
+    print(str_replace("hello world", "world", "lux"))
+    print(str_contains("hello world", "world"))
+    print(str_contains("hello world", "foo"))
+
+    // String split and join
+    let parts = str_split("a,b,c", ",")
+    print(parts)
+    print(str_join(["x", "y", "z"], "-"))
+
+    // List functions
+    let nums = [1, 2, 3, 4, 5]
+    print(take(3, nums))
+    print(drop(2, nums))
+    print(nth(3, nums))
+
+    // Zip and enumerate
+    print(zip([1, 2, 3], ["a", "b", "c"]))
+    print(enumerate(["x", "y", "z"]))
+
+    // Member and unique
+    print(member(3, nums))
+    print(member(10, nums))
+    print(unique([1, 2, 2, 3, 3, 3, 1]))
+}

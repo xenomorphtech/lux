@@ -1,0 +1,22 @@
+// Test list comprehensions
+mod listcomp
+
+fn doubles(list: [Int]) -> [Int] {
+    [x * 2 for x in list]
+}
+
+fn evens(list: [Int]) -> [Int] {
+    [x for x in list if x % 2 == 0]
+}
+
+fn double_evens(list: [Int]) -> [Int] {
+    [x * 2 for x in list if x % 2 == 0]
+}
+
+fn main() -> () {
+    let nums = [1, 2, 3, 4, 5]
+
+    print(doubles(nums))
+    print(evens(nums))
+    print(double_evens(nums))
+}

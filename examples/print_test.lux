@@ -1,0 +1,8 @@
+mod print_test
+
+fn main() -> Int {
+    print(42)
+    print("Hello, Lux!")
+    print(:world)
+    0
+}

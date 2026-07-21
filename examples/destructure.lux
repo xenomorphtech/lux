@@ -1,0 +1,23 @@
+// Test tuple destructuring in let
+mod destructure
+
+fn swap(pair: (Int, Int)) -> (Int, Int) {
+    let (a, b) = pair
+    (b, a)
+}
+
+fn sum_triple(triple: (Int, Int, Int)) -> Int {
+    let (x, y, z) = triple
+    x + y + z
+}
+
+fn main() -> Int {
+    let pair = (10, 20)
+    let (first, second) = swap(pair)
+    print(first)
+    print(second)
+
+    let result = sum_triple((1, 2, 3))
+    print(result)
+    result
+}

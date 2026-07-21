@@ -1,0 +1,23 @@
+// Test parsing lexer.lux
+mod test_parse_lexer
+
+extern "erlang" {
+    fn file::read_file(String) -> (Atom, Any)
+    fn lexer::tokenize(String) -> List<Any>
+    fn parser::parse(List<Any>) -> Any
+}
+
+fn main() -> () {
+    match file::read_file("self/lexer.lux") {
+        (:ok, binary) => {
+            let source = binary_to_list(binary)
+            let tokens = lexer::tokenize(source)
+            let _ = print("Tokenizing complete")
+            let _ = print(length(tokens))
+            let parse_result = parser::parse(tokens)
+            let _ = print("Parsing complete")
+            print(parse_result)
+        },
+        (:error, e) => print(e)
+    }
+}

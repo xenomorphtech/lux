@@ -1,0 +1,21 @@
+// Binary strings and binary pattern matching
+mod binary
+
+fn tail_after_a(input: String) -> String {
+    match input {
+        <<0x41:8, rest>> => rest,
+        _ => <<"">>
+    }
+}
+
+fn main() -> Bool {
+    let packed = <<0x44434241:32>>
+    let utf8_packed = <<65/utf8, "BCD"/binary>>
+    print(packed)
+    print(byte_size(packed))
+    print(tail_after_a("ABCD"))
+    print(utf8_packed)
+    print(is_string(packed))
+    print(is_binary(packed))
+    packed == "ABCD" && utf8_packed == "ABCD"
+}

@@ -1,0 +1,25 @@
+// Test debug functions
+mod debug
+
+fn main() -> () {
+    // Test assert - passes
+    assert(1 + 1 == 2)
+    print("Assert passed!")
+
+    // Test dbg - prints and returns value
+    let x = dbg(42)
+    print(x)
+
+    // Chain dbg in expressions
+    let result = dbg(10) + dbg(20)
+    print(result)
+
+    // Test typeof
+    print(typeof(42))
+    print(typeof(3.14))
+    print(typeof(:hello))
+    print(typeof([1, 2, 3]))
+    print(typeof((1, 2)))
+    print(typeof(%{:a => 1}))
+    print(typeof(|x| x + 1))
+}

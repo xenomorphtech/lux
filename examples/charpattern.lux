@@ -1,0 +1,42 @@
+// Test char pattern matching
+mod charpattern
+
+fn classify_char(c: Int) -> String {
+    match c {
+        'a' => "letter a",
+        'b' => "letter b",
+        'A' => "uppercase A",
+        '0' => "digit zero",
+        '\n' => "newline",
+        '\t' => "tab",
+        _ => "other"
+    }
+}
+
+fn is_digit(c: Int) -> Bool {
+    match c {
+        '0' => true,
+        '1' => true,
+        '2' => true,
+        '3' => true,
+        '4' => true,
+        '5' => true,
+        '6' => true,
+        '7' => true,
+        '8' => true,
+        '9' => true,
+        _ => false
+    }
+}
+
+fn main() -> () {
+    print(classify_char('a'))
+    print(classify_char('b'))
+    print(classify_char('A'))
+    print(classify_char('0'))
+    print(classify_char('\n'))
+    print(classify_char('z'))
+
+    print(is_digit('5'))
+    print(is_digit('a'))
+}

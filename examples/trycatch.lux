@@ -1,0 +1,18 @@
+// Test try/catch expressions
+mod trycatch
+
+fn safe_divide(a: Int, b: Int) -> Int {
+    try {
+        a / b
+    } catch {
+        reason => {
+            print("Division error!")
+            0
+        }
+    }
+}
+
+fn main() -> () {
+    print(safe_divide(10, 2))
+    print(safe_divide(10, 0))
+}

@@ -1,0 +1,14 @@
+// Test string interpolation
+mod interp
+
+fn greet(name: String) -> String {
+    "Hello, ${name}!"
+}
+
+fn main() -> String {
+    let name = "World"
+    let age = 42
+    let msg = "Name: ${name}, Age: ${age}"
+    print(msg)
+    msg
+}

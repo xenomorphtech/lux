@@ -1,0 +1,24 @@
+// Test list patterns with head|tail
+mod listpat
+
+fn sum_list(list: [Int]) -> Int {
+    match list {
+        [] => 0,
+        [x | xs] => x + sum_list(xs)
+    }
+}
+
+fn first_two(list: [Int]) -> (Int, Int) {
+    match list {
+        [a, b | _] => (a, b),
+        [a] => (a, 0),
+        [] => (0, 0)
+    }
+}
+
+fn main() -> () {
+    print(sum_list([1, 2, 3, 4, 5]))
+    print(first_two([10, 20, 30]))
+    print(first_two([42]))
+    print(first_two([]))
+}

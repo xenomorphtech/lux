@@ -1,0 +1,26 @@
+// Test bitwise operations
+mod bitwise
+
+fn main() -> () {
+    // Bitwise AND
+    print(band(5, 3))   // 5 & 3 = 1 (101 & 011 = 001)
+
+    // Bitwise OR
+    print(bor(5, 3))    // 5 | 3 = 7 (101 | 011 = 111)
+
+    // Bitwise XOR
+    print(bxor(5, 3))   // 5 ^ 3 = 6 (101 ^ 011 = 110)
+
+    // Bitwise NOT
+    print(bnot(0))      // ~0 = -1
+
+    // Bit shift left
+    print(bsl(1, 4))    // 1 << 4 = 16
+
+    // Bit shift right
+    print(bsr(16, 2))   // 16 >> 2 = 4
+
+    // Integer division and remainder
+    print(div(17, 5))   // 17 / 5 = 3
+    print(rem(17, 5))   // 17 % 5 = 2
+}

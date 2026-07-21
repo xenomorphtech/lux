@@ -1,0 +1,19 @@
+// Test ++ concatenation operator
+mod concat
+
+fn concat_strings() -> String {
+    let a = "Hello"
+    let b = " World"
+    a ++ b
+}
+
+fn concat_lists() -> [Int] {
+    let a = [1, 2, 3]
+    let b = [4, 5, 6]
+    a ++ b
+}
+
+fn main() -> () {
+    print(concat_strings())
+    print(concat_lists())
+}

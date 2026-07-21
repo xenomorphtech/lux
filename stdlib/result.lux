@@ -1,0 +1,93 @@
+// Result type for error handling
+mod result
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// Map over Ok value
+fn map_ok(f: fn(Int) -> Int, res: Result<Int, Int>) -> Result<Int, Int> {
+    match res {
+        Result::Ok(x) => Result::Ok(f(x)),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+// Map over Err value
+fn map_err(f: fn(Int) -> Int, res: Result<Int, Int>) -> Result<Int, Int> {
+    match res {
+        Result::Ok(x) => Result::Ok(x),
+        Result::Err(e) => Result::Err(f(e))
+    }
+}
+
+// Unwrap with default for Ok
+fn unwrap_ok(res: Result<Int, Int>, default: Int) -> Int {
+    match res {
+        Result::Ok(x) => x,
+        Result::Err(_) => default
+    }
+}
+
+// Unwrap with default for Err
+fn unwrap_err(res: Result<Int, Int>, default: Int) -> Int {
+    match res {
+        Result::Ok(_) => default,
+        Result::Err(e) => e
+    }
+}
+
+// Check if Ok
+fn is_ok(res: Result<Int, Int>) -> Bool {
+    match res {
+        Result::Ok(_) => true,
+        Result::Err(_) => false
+    }
+}
+
+// Check if Err
+fn is_err(res: Result<Int, Int>) -> Bool {
+    match res {
+        Result::Ok(_) => false,
+        Result::Err(_) => true
+    }
+}
+
+// Flat map (and_then)
+fn and_then_ok(res: Result<Int, Int>, f: fn(Int) -> Result<Int, Int>) -> Result<Int, Int> {
+    match res {
+        Result::Ok(x) => f(x),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+// Or else - recover from error
+fn or_else_err(res: Result<Int, Int>, f: fn(Int) -> Result<Int, Int>) -> Result<Int, Int> {
+    match res {
+        Result::Ok(x) => Result::Ok(x),
+        Result::Err(e) => f(e)
+    }
+}
+
+// Test
+fn main() -> Int {
+    let ok_val = Result::Ok(42)
+    let err_val = Result::Err(500)
+    
+    // Test unwrap
+    let a = unwrap_ok(ok_val, 0)
+    let b = unwrap_ok(err_val, 0)
+    print(a)
+    print(b)
+    
+    // Test map_ok
+    let doubled = map_ok(|x| x * 2, ok_val)
+    print(unwrap_ok(doubled, 0))
+    
+    // Test is_ok/is_err
+    print(is_ok(ok_val))
+    print(is_err(err_val))
+    
+    a
+}

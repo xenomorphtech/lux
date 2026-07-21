@@ -1,0 +1,17 @@
+mod counter
+
+fn counter(n: Int) -> Int {
+    receive {
+        :inc => counter(n + 1),
+        :dec => counter(n - 1),
+        :stop => n
+    }
+}
+
+fn main() -> Int {
+    let pid = spawn(|| counter(0))
+    send(pid, :inc)
+    send(pid, :inc)
+    send(pid, :stop)
+    42
+}

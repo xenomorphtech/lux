@@ -1,0 +1,14 @@
+# Build artifacts
+/target/
+*.beam
+*.core
+
+# Editor
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+erl_crash.dump

@@ -1,0 +1,34 @@
+// Test map functions
+mod mapfuncs
+
+fn main() -> () {
+    // Create a map
+    let m = %{:name => "Alice", :city => "Paris"}
+    print(m)
+
+    // Map operations
+    let m2 = map_put(m, :city, "NYC")
+    print(m2)
+
+    print(map_get(m2, :name))
+    print(map_get_or(m2, :missing, "default"))
+
+    print(map_has_key(m2, :name))
+    print(map_has_key(m2, :foo))
+
+    print(map_keys(m2))
+    print(map_values(m2))
+    print(map_size(m2))
+
+    // Remove key
+    let m3 = map_remove(m2, :city)
+    print(m3)
+
+    // Merge maps
+    let m4 = map_merge(%{:a => "1"}, %{:b => "2"})
+    print(m4)
+
+    // Convert to/from list
+    print(map_to_list(m))
+    print(list_to_map([(:x, 10), (:y, 20)]))
+}

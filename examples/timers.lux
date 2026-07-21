@@ -1,0 +1,27 @@
+// Test timer and utility functions
+mod timers
+
+fn main() -> () {
+    // Current time
+    let t1 = now()
+    print(t1)
+
+    // Sleep for 100ms
+    sleep(100)
+    let t2 = now()
+    print(t2 - t1)  // Should be ~100
+
+    // Random numbers
+    random_seed()
+    print(random())     // Float 0.0-1.0
+    print(random_below(100))  // Int 1-100
+    print(random_below(100))
+    print(random_below(100))
+
+    // Make a unique reference
+    let ref = make_ref()
+    print(ref)
+
+    // Self pid
+    print(self())
+}

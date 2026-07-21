@@ -1,0 +1,26 @@
+// Replacement for the old cross-module source import example.
+//
+// In the current live-code model, reusable functions are typically published
+// into a namespace and callers compile against a snapshot of that namespace.
+// This file stays compileable while keeping the math helpers local.
+mod use_example
+
+fn square(x: Int) -> Int {
+    x * x
+}
+
+fn cube(x: Int) -> Int {
+    x * x * x
+}
+
+fn factorial(n: Int) -> Int {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+fn main() -> Int {
+    square(4) + cube(2) + factorial(6)
+}

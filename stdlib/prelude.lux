@@ -1,0 +1,201 @@
+// Lux Prelude - Built-in functions with type definitions
+// These map Lux function names to Erlang module::function calls
+// Note: Some Erlang functions use Lux keywords as names and are commented out
+mod prelude
+
+// ============================================================================
+// Standard Enums
+// ============================================================================
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// ============================================================================
+// String Functions (via Erlang string module)
+// ============================================================================
+
+extern "erlang" {
+    fn string::length(String) -> Int
+    fn string::concat(String, String) -> String
+    fn string::trim(String) -> String
+    fn string::uppercase(String) -> String
+    fn string::lowercase(String) -> String
+    fn string::slice(String, Int, Int) -> String
+    fn string::prefix(String, String) -> String
+    fn string::find(String, String) -> Any
+}
+
+// ============================================================================
+// List Functions (via Erlang lists module)
+// ============================================================================
+
+extern "erlang" {
+    fn lists::sublist<T>(List<T>, Int) -> List<T>
+    fn lists::nthtail<T>(Int, List<T>) -> List<T>
+    fn lists::nth<T>(Int, List<T>) -> T
+    fn lists::member<T>(T, List<T>) -> Bool
+    fn lists::usort<T>(List<T>) -> List<T>
+    fn lists::reverse<T>(List<T>) -> List<T>
+    fn lists::seq(Int, Int) -> List<Int>
+    fn lists::sort<T>(List<T>) -> List<T>
+}
+
+// ============================================================================
+// Map Functions (via Erlang maps module)
+// ============================================================================
+
+extern "erlang" {
+    fn maps::keys<K, V>(Map<K, V>) -> List<K>
+    fn maps::values<K, V>(Map<K, V>) -> List<V>
+    fn maps::size<K, V>(Map<K, V>) -> Int
+}
+
+// ============================================================================
+// File I/O Functions (via Erlang file module)
+// ============================================================================
+
+extern "erlang" {
+    fn file::read_file(String) -> Any
+    fn file::write_file(String, String) -> Atom
+    fn file::delete(String) -> Atom
+    fn file::make_dir(String) -> Atom
+    fn file::get_cwd() -> Any
+}
+
+extern "erlang" {
+    fn filelib::is_file(String) -> Bool
+    fn filelib::is_dir(String) -> Bool
+}
+
+// ============================================================================
+// OS Functions
+// ============================================================================
+
+extern "erlang" {
+    fn os::cmd(String) -> String
+    fn os::getenv(String) -> String
+    fn os::putenv(String, String) -> Bool
+    fn os::timestamp() -> Any
+}
+
+extern "erlang" {
+    fn init::get_plain_arguments() -> List<String>
+    fn init::stop() -> Atom
+}
+
+// ============================================================================
+// Erlang BIFs (Built-in Functions)
+// Note: spawn, send, receive, self are Lux keywords/builtins
+// ============================================================================
+
+extern "erlang" {
+    fn erlang::link(Pid) -> Bool
+    fn erlang::unlink(Pid) -> Bool
+    fn erlang::register(Atom, Pid) -> Bool
+    fn erlang::whereis(Atom) -> Pid
+    fn erlang::registered() -> List<Atom>
+    fn erlang::make_ref() -> Ref
+    fn erlang::halt(Int) -> Never
+    fn erlang::error(Any) -> Never
+
+    // Process dictionary
+    fn erlang::get(Atom) -> Any
+    fn erlang::put(Atom, Any) -> Any
+    fn erlang::erase(Atom) -> Any
+
+    // Tuple operations
+    fn erlang::element(Int, Any) -> Any
+    fn erlang::setelement(Int, Any, Any) -> Any
+    fn erlang::tuple_size(Any) -> Int
+    fn erlang::tuple_to_list(Any) -> List<Any>
+    fn erlang::list_to_tuple(List<Any>) -> Any
+
+    // Type conversions
+    fn erlang::atom_to_list(Atom) -> List<Int>
+    fn erlang::list_to_atom(List<Int>) -> Atom
+    fn erlang::integer_to_list(Int) -> List<Int>
+    fn erlang::list_to_integer(List<Int>) -> Int
+    fn erlang::binary_to_list(String) -> List<Int>
+    fn erlang::list_to_binary(List<Int>) -> String
+    fn erlang::term_to_binary(Any) -> String
+    fn erlang::binary_to_term(String) -> Any
+
+    // Type checks
+    fn erlang::is_integer(Any) -> Bool
+    fn erlang::is_float(Any) -> Bool
+    fn erlang::is_number(Any) -> Bool
+    fn erlang::is_atom(Any) -> Bool
+    fn erlang::is_list(Any) -> Bool
+    fn erlang::is_tuple(Any) -> Bool
+    fn erlang::is_map(Any) -> Bool
+    fn erlang::is_pid(Any) -> Bool
+    fn erlang::is_binary(Any) -> Bool
+
+    // Binary
+    fn erlang::byte_size(String) -> Int
+    fn erlang::bit_size(String) -> Int
+
+    // Arithmetic
+    fn erlang::abs(Int) -> Int
+    fn erlang::min(Int, Int) -> Int
+    fn erlang::max(Int, Int) -> Int
+
+    // Bitwise
+    fn erlang::band(Int, Int) -> Int
+    fn erlang::bor(Int, Int) -> Int
+    fn erlang::bxor(Int, Int) -> Int
+    fn erlang::bnot(Int) -> Int
+    fn erlang::bsl(Int, Int) -> Int
+    fn erlang::bsr(Int, Int) -> Int
+
+    // Time
+    fn erlang::system_time() -> Int
+    fn erlang::now() -> Any
+
+    // Misc
+    fn erlang::length(List<Any>) -> Int
+}
+
+// ============================================================================
+// Binary module
+// ============================================================================
+
+extern "erlang" {
+    fn binary::at(String, Int) -> Int
+    fn binary::part(String, Int, Int) -> String
+}
+
+// ============================================================================
+// I/O module
+// ============================================================================
+
+extern "erlang" {
+    fn io::format(String, List<Any>) -> Atom
+    fn io::get_line(String) -> String
+    fn io::put_chars(String) -> Atom
+}
+
+// ============================================================================
+// Timer module
+// ============================================================================
+
+extern "erlang" {
+    fn timer::sleep(Int) -> Atom
+}
+
+// ============================================================================
+// Test function
+// ============================================================================
+
+fn main() -> () {
+    let _ = print("Lux Prelude loaded")
+    let _ = print(lists::reverse([1, 2, 3]))
+    ()
+}

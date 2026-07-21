@@ -1,0 +1,17 @@
+// Test receive timeout
+mod timeout
+
+fn wait_for_msg() -> Atom {
+    receive {
+        :hello => :got_hello,
+        :world => :got_world,
+        after 100 => :timed_out
+    }
+}
+
+fn main() -> Atom {
+    // No message sent, should timeout
+    let result = wait_for_msg()
+    print(result)
+    result
+}

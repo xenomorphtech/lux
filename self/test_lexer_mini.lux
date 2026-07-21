@@ -1,0 +1,22 @@
+// Minimal test file mimicking lexer.lux structure
+mod lexer_mini
+
+// Option type
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// A struct
+struct Token {
+    kind: Int,
+    pos: Int
+}
+
+fn is_digit(c: Int) -> Bool {
+    c >= 48
+}
+
+fn main() -> () {
+    print(is_digit(50))
+}

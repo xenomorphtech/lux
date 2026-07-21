@@ -1,0 +1,66 @@
+// Simple key-value store using processes
+mod kvstore
+
+// Store operations as atoms
+// :put - store a value
+// :get - retrieve a value
+// :stop - stop the store
+
+// The store loop - maintains state as list of (key, value) pairs
+fn store_loop(data: List<Int>) -> Int {
+    receive {
+        :put => {
+            // For simplicity, just push to front of list
+            // In real code would handle key properly
+            receive {
+                val => store_loop([val | data])
+            }
+        },
+        :get => {
+            // Return first element
+            match data {
+                [] => {
+                    print(:empty)
+                    store_loop(data)
+                },
+                [head | _] => {
+                    print(head)
+                    store_loop(data)
+                }
+            }
+        },
+        :dump => {
+            print(data)
+            store_loop(data)
+        },
+        :stop => {
+            print(:stopped)
+            0
+        }
+    }
+}
+
+fn main() -> Int {
+    let store = spawn(|| store_loop([]))
+    
+    // Put some values
+    send(store, :put)
+    send(store, 42)
+    
+    send(store, :put)
+    send(store, 100)
+    
+    send(store, :put)
+    send(store, 7)
+    
+    // Dump the store
+    send(store, :dump)
+    
+    // Get (returns most recent)
+    send(store, :get)
+    
+    // Stop
+    send(store, :stop)
+    
+    0
+}

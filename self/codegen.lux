@@ -1,0 +1,857 @@
+// Code generator for the Lux self-hosted compiler
+// Translates AST to Core Erlang
+mod codegen
+
+// Import AST types (inline for now since we don't have module imports yet)
+
+struct Span {
+    start: Int,
+    end_pos: Int
+}
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+enum BinOp {
+    OpAdd, OpSub, OpMul, OpDiv, OpMod,
+    OpEq, OpNotEq, OpLt, OpLtEq, OpGt, OpGtEq,
+    OpAnd, OpOr, OpConcat, OpPipe,
+}
+
+enum UnaryOp {
+    OpNeg, OpNot,
+}
+
+enum Pattern {
+    PatWildcard(Span),
+    PatVar(String, Span),
+    PatInt(Int, Span),
+    PatString(String, Span),
+    PatBool(Bool, Span),
+    PatAtom(String, Span),
+    PatTuple(List<Pattern>, Span),
+    PatList(List<Pattern>, Option<Pattern>, Span),
+    PatConstructor(List<String>, List<Pattern>, Span),
+}
+
+enum Expr {
+    ExprInt(Int, Span),
+    ExprChar(Int, Span),
+    ExprFloat(Float, Span),
+    ExprString(String, Span),
+    ExprBool(Bool, Span),
+    ExprAtom(String, Span),
+    ExprUnit(Span),
+    ExprVar(String, Span),
+    ExprTuple(List<Expr>, Span),
+    ExprList(List<Expr>, Option<Expr>, Span),
+    ExprBinary(Expr, BinOp, Expr, Span),
+    ExprUnary(UnaryOp, Expr, Span),
+    ExprIf(Expr, Expr, Option<Expr>, Span),
+    ExprMatch(Expr, List<MatchArm>, Span),
+    ExprBlock(List<Stmt>, Option<Expr>, Span),
+    ExprCall(Expr, List<Expr>, Span),
+    ExprLambda(List<Param>, Expr, Span),
+    ExprPath(List<String>, Span),
+    ExprCond(List<CondBranch>, Span),
+    ExprListComp(Expr, String, Expr, Option<Expr>, Span),
+    ExprFieldAccess(Expr, String, Span),
+    ExprStructInit(String, List<FieldInit>, Span),
+}
+
+struct FieldInit {
+    name: String,
+    value: Expr
+}
+
+struct CondBranch {
+    condition: Expr,
+    result: Expr,
+    span: Span
+}
+
+struct MatchArm {
+    pattern: Pattern,
+    guard: Option<Expr>,
+    body: Expr,
+    span: Span
+}
+
+enum Stmt {
+    StmtLet(Pattern, Option<TypeExpr>, Expr, Span),
+    StmtExpr(Expr),
+}
+
+// TypeExpr placeholder - we don't use it in codegen but need it for pattern matching
+enum TypeExpr {
+    TyNamed(String, List<TypeExpr>, Span),
+    TyUnit(Span),
+}
+
+struct Param {
+    name: String,
+    span: Span
+}
+
+struct Function {
+    name: String,
+    params: List<Param>,
+    body: Expr,
+    span: Span
+}
+
+enum Item {
+    ItemFunction(Function),
+    ItemEnum(Any),
+    ItemStruct(Any),
+}
+
+struct Module {
+    name: Option<String>,
+    items: List<Item>,
+    span: Span
+}
+
+// Core Erlang AST
+
+enum CoreExpr {
+    CoreLitInt(Int),
+    CoreLitFloat(Float),
+    CoreLitAtom(String),
+    CoreLitString(String),
+    CoreLitNil,
+    CoreVar(String),
+    CoreFunRef(String, Int),
+    CoreTuple(List<CoreExpr>),
+    CoreCons(CoreExpr, CoreExpr),
+    CoreFun(List<String>, CoreExpr),
+    CoreLet(String, CoreExpr, CoreExpr),
+    CoreApply(CoreExpr, List<CoreExpr>),
+    CoreCall(String, String, List<CoreExpr>),
+    CoreCase(CoreExpr, List<CoreClause>),
+    CoreSeq(CoreExpr, CoreExpr),
+    CoreMap(List<CoreMapPair>),
+}
+
+struct CoreMapPair {
+    key: CoreExpr,
+    value: CoreExpr
+}
+
+struct CoreClause {
+    pattern: CorePattern,
+    guard: CoreExpr,
+    body: CoreExpr
+}
+
+enum CorePattern {
+    CorePatVar(String),
+    CorePatLitInt(Int),
+    CorePatLitAtom(String),
+    CorePatLitString(String),
+    CorePatTuple(List<CorePattern>),
+    CorePatCons(CorePattern, CorePattern),
+    CorePatNil,
+}
+
+struct CoreFunDef {
+    name: String,
+    arity: Int,
+    params: List<String>,
+    body: CoreExpr
+}
+
+struct CoreModule {
+    name: String,
+    exports: List<(String, Int)>,
+    functions: List<CoreFunDef>
+}
+
+// Fresh variable counter
+fn fresh_var(counter: Int) -> (String, Int) {
+    let name = str_concat("_cor", to_string(counter))
+    (name, counter + 1)
+}
+
+// Translation from Lux AST to Core Erlang
+
+fn translate_expr(expr: Expr, counter: Int) -> (CoreExpr, Int) {
+    match expr {
+        Expr::ExprInt(n, _) => (CoreExpr::CoreLitInt(n), counter),
+        Expr::ExprChar(c, _) => (CoreExpr::CoreLitInt(c), counter),
+        Expr::ExprFloat(f, _) => (CoreExpr::CoreLitFloat(f), counter),
+        Expr::ExprString(s, _) => (CoreExpr::CoreLitString(s), counter),
+        Expr::ExprBool(b, _) => (CoreExpr::CoreLitAtom(bool_to_atom(b)), counter),
+        Expr::ExprAtom(a, _) => (CoreExpr::CoreLitAtom(a), counter),
+        Expr::ExprUnit(_) => (CoreExpr::CoreLitAtom("ok"), counter),
+        Expr::ExprVar(name, _) => (CoreExpr::CoreVar(mangle_var(name)), counter),
+        Expr::ExprTuple(exprs, _) => translate_tuple(exprs, counter),
+        Expr::ExprList(exprs, tail, _) => translate_list(exprs, tail, counter),
+        Expr::ExprBinary(left, op, right, _) => translate_binary(left, op, right, counter),
+        Expr::ExprUnary(op, inner, _) => translate_unary(op, inner, counter),
+        Expr::ExprIf(cond_e, then_e, else_opt, _) => translate_if(cond_e, then_e, else_opt, counter),
+        Expr::ExprBlock(stmts, final_expr, _) => translate_block(stmts, final_expr, counter),
+        Expr::ExprCall(func, args, _) => translate_call(func, args, counter),
+        Expr::ExprLambda(params, body, _) => translate_lambda(params, body, counter),
+        Expr::ExprPath(segments, _) => translate_path(segments, counter),
+        Expr::ExprMatch(scrutinee, arms, _) => translate_match(scrutinee, arms, counter),
+        Expr::ExprListComp(body, var, iter, filter_opt, _) => translate_list_comp(body, var, iter, filter_opt, counter),
+        Expr::ExprFieldAccess(obj, field, _) => translate_field_access(obj, field, counter),
+        Expr::ExprStructInit(_name, fields, _span) => translate_struct_init(fields, counter),
+        Expr::ExprCond(branches, _) => translate_cond(branches, counter),
+        _ => (CoreExpr::CoreLitAtom("todo"), counter)
+    }
+}
+
+fn translate_tuple(exprs: List<Expr>, counter: Int) -> (CoreExpr, Int) {
+    let (core_exprs, new_counter) = translate_expr_list(exprs, counter)
+    (CoreExpr::CoreTuple(core_exprs), new_counter)
+}
+
+fn translate_binary(left: Expr, op: BinOp, right: Expr, counter: Int) -> (CoreExpr, Int) {
+    let (left_core, c1) = translate_expr(left, counter)
+    let (right_core, c2) = translate_expr(right, c1)
+    let (mod_name, fun_name) = binop_to_erlang(op)
+    (CoreExpr::CoreCall(mod_name, fun_name, [left_core, right_core]), c2)
+}
+
+fn translate_unary(op: UnaryOp, inner: Expr, counter: Int) -> (CoreExpr, Int) {
+    let (inner_core, new_counter) = translate_expr(inner, counter)
+    match op {
+        UnaryOp::OpNeg => (CoreExpr::CoreCall("erlang", "-", [inner_core]), new_counter),
+        UnaryOp::OpNot => (CoreExpr::CoreCall("erlang", "not", [inner_core]), new_counter),
+    }
+}
+
+fn translate_if(cond_e: Expr, then_e: Expr, else_opt: Option<Expr>, counter: Int) -> (CoreExpr, Int) {
+    let (cond_core, c1) = translate_expr(cond_e, counter)
+    let (then_core, c2) = translate_expr(then_e, c1)
+    let (else_core, c3) = match else_opt {
+        Option::Some(e) => translate_expr(e, c2),
+        Option::None => (CoreExpr::CoreLitAtom("ok"), c2),
+    }
+    let clauses = [
+        CoreClause { pattern: CorePattern::CorePatLitAtom("true"), guard: CoreExpr::CoreLitAtom("true"), body: then_core },
+        CoreClause { pattern: CorePattern::CorePatLitAtom("false"), guard: CoreExpr::CoreLitAtom("true"), body: else_core }
+    ]
+    (CoreExpr::CoreCase(cond_core, clauses), c3)
+}
+
+// Translate cond expression to Core Erlang case on 'true' with guards
+fn translate_cond(branches: List<CondBranch>, counter: Int) -> (CoreExpr, Int) {
+    let (clauses, new_counter) = translate_cond_branches(branches, counter)
+    // Case on literal 'true' - the guards do the actual condition checking
+    (CoreExpr::CoreCase(CoreExpr::CoreLitAtom("true"), clauses), new_counter)
+}
+
+fn translate_cond_branches(branches: List<CondBranch>, counter: Int) -> (List<CoreClause>, Int) {
+    match branches {
+        [] => ([], counter),
+        [b | rest] => {
+            let (cond_core, c1) = translate_expr(b.condition, counter)
+            let (result_core, c2) = translate_expr(b.result, c1)
+            let clause = CoreClause {
+                pattern: CorePattern::CorePatLitAtom("true"),
+                guard: cond_core,
+                body: result_core
+            }
+            let (rest_clauses, c3) = translate_cond_branches(rest, c2)
+            ([clause | rest_clauses], c3)
+        }
+    }
+}
+
+fn translate_lambda(params: List<Param>, body: Expr, counter: Int) -> (CoreExpr, Int) {
+    let core_params = [mangle_var(p.name) for p in params]
+    let (body_core, new_counter) = translate_expr(body, counter)
+    (CoreExpr::CoreFun(core_params, body_core), new_counter)
+}
+
+fn translate_list_comp(body: Expr, var: String, iter: Expr, filter_opt: Option<Expr>, counter: Int) -> (CoreExpr, Int) {
+    // Translate [body for var in iter] to lists:map(fun(var) -> body end, iter)
+    // Translate [body for var in iter if cond] to lists:map(fun(var) -> body end, lists:filter(fun(var) -> cond end, iter))
+    let mangled_var = mangle_var(var)
+    let (body_core, c1) = translate_expr(body, counter)
+    let (iter_core, c2) = translate_expr(iter, c1)
+    let map_lambda = CoreExpr::CoreFun([mangled_var], body_core)
+    match filter_opt {
+        Option::Some(filter_expr) => {
+            let (filter_core, c3) = translate_expr(filter_expr, c2)
+            let filter_lambda = CoreExpr::CoreFun([mangled_var], filter_core)
+            let filtered = CoreExpr::CoreCall("lists", "filter", [filter_lambda, iter_core])
+            (CoreExpr::CoreCall("lists", "map", [map_lambda, filtered]), c3)
+        },
+        Option::None => {
+            (CoreExpr::CoreCall("lists", "map", [map_lambda, iter_core]), c2)
+        }
+    }
+}
+
+fn translate_field_access(obj: Expr, field: String, counter: Int) -> (CoreExpr, Int) {
+    // obj.field -> call 'maps':'get'('field', obj_core)
+    let (obj_core, c1) = translate_expr(obj, counter)
+    let field_atom = CoreExpr::CoreLitAtom(field)
+    (CoreExpr::CoreCall("maps", "get", [field_atom, obj_core]), c1)
+}
+
+fn translate_struct_init(fields: List<FieldInit>, counter: Int) -> (CoreExpr, Int) {
+    // StructName { field1: val1, field2: val2 } -> ~{'field1' => val1, 'field2' => val2}~
+    let (pairs, new_counter) = translate_field_inits(fields, counter)
+    (CoreExpr::CoreMap(pairs), new_counter)
+}
+
+fn translate_field_inits(fields: List<FieldInit>, counter: Int) -> (List<CoreMapPair>, Int) {
+    match fields {
+        [] => ([], counter),
+        [f | rest] => {
+            let (value_core, c1) = translate_expr(f.value, counter)
+            let pair = CoreMapPair { key: CoreExpr::CoreLitAtom(f.name), value: value_core }
+            let (rest_pairs, c2) = translate_field_inits(rest, c1)
+            ([pair | rest_pairs], c2)
+        }
+    }
+}
+
+fn translate_path(segments: List<String>, counter: Int) -> (CoreExpr, Int) {
+    match segments {
+        [type_name, variant_name] => {
+            // Check if variant_name starts with uppercase (enum constructor without args)
+            let first_char = hd(variant_name)
+            if first_char >= 65 {
+                if first_char <= 90 {
+                    // Uppercase - this is an enum variant like Option::None
+                    // Generate a tuple: {variant_name_lowercase}
+                    let atom = CoreExpr::CoreLitAtom(to_lowercase(variant_name))
+                    (CoreExpr::CoreTuple([atom]), counter)
+                } else {
+                    // Not uppercase - variable reference
+                    (CoreExpr::CoreVar(str_concat(str_concat(type_name, "_"), variant_name)), counter)
+                }
+            } else {
+                // Lowercase - variable reference
+                (CoreExpr::CoreVar(str_concat(str_concat(type_name, "_"), variant_name)), counter)
+            }
+        },
+        _ => (CoreExpr::CoreLitAtom("error"), counter)
+    }
+}
+
+fn translate_match(scrutinee: Expr, arms: List<MatchArm>, counter: Int) -> (CoreExpr, Int) {
+    let (scrut_core, c1) = translate_expr(scrutinee, counter)
+    let (clauses, c2) = translate_match_arms(arms, c1)
+    (CoreExpr::CoreCase(scrut_core, clauses), c2)
+}
+
+fn translate_expr_list(exprs: List<Expr>, counter: Int) -> (List<CoreExpr>, Int) {
+    match exprs {
+        [] => ([], counter),
+        [e | rest] => {
+            let (core_e, c1) = translate_expr(e, counter)
+            let (core_rest, c2) = translate_expr_list(rest, c1)
+            ([core_e | core_rest], c2)
+        },
+    }
+}
+
+fn translate_list(exprs: List<Expr>, tail: Option<Expr>, counter: Int) -> (CoreExpr, Int) {
+    match exprs {
+        [] => {
+            match tail {
+                Option::Some(t) => translate_expr(t, counter),
+                Option::None => (CoreExpr::CoreLitNil, counter),
+            }
+        },
+        [e | rest] => {
+            let (head_core, c1) = translate_expr(e, counter)
+            let (tail_core, c2) = translate_list(rest, tail, c1)
+            (CoreExpr::CoreCons(head_core, tail_core), c2)
+        },
+    }
+}
+
+fn translate_block(stmts: List<Stmt>, final_expr: Option<Expr>, counter: Int) -> (CoreExpr, Int) {
+    match stmts {
+        [] => {
+            match final_expr {
+                Option::Some(e) => translate_expr(e, counter),
+                Option::None => (CoreExpr::CoreLitAtom("ok"), counter),
+            }
+        },
+        [stmt | rest] => {
+            match stmt {
+                Stmt::StmtLet(pattern, _ty, init, _) => {
+                    let (init_core, c1) = translate_expr(init, counter)
+                    let (rest_core, c2) = translate_block(rest, final_expr, c1)
+                    match pattern {
+                        Pattern::PatVar(name, _) => (CoreExpr::CoreLet(mangle_var(name), init_core, rest_core), c2),
+                        Pattern::PatWildcard(_) => (CoreExpr::CoreSeq(init_core, rest_core), c2),
+                        Pattern::PatTuple(pats, span) => {
+                            // Use case expression to destructure tuple
+                            let core_pat = translate_pattern(Pattern::PatTuple(pats, span))
+                            let clause = CoreClause {
+                                pattern: core_pat,
+                                guard: CoreExpr::CoreLitAtom("true"),
+                                body: rest_core
+                            }
+                            (CoreExpr::CoreCase(init_core, [clause]), c2)
+                        },
+                        _ => (CoreExpr::CoreSeq(init_core, rest_core), c2),
+                    }
+                },
+                Stmt::StmtExpr(e) => {
+                    let (expr_core, c1) = translate_expr(e, counter)
+                    let (rest_core, c2) = translate_block(rest, final_expr, c1)
+                    (CoreExpr::CoreSeq(expr_core, rest_core), c2)
+                },
+            }
+        },
+    }
+}
+
+fn translate_builtin(name: String, args_core: List<CoreExpr>, counter: Int) -> Option<(CoreExpr, Int)> {
+    // Handle common built-in functions
+    if name == "print" {
+        let format_str = CoreExpr::CoreLitString("~p~n")
+        let args_list = list_to_cons(args_core)
+        Option::Some((CoreExpr::CoreCall("io", "format", [format_str, args_list]), counter))
+    } else {
+        if name == "str_concat" {
+            Option::Some((CoreExpr::CoreCall("string", "concat", args_core), counter))
+        } else {
+            if name == "str_length" {
+                Option::Some((CoreExpr::CoreCall("string", "length", args_core), counter))
+            } else {
+                if name == "to_string" {
+                    let format_str = CoreExpr::CoreLitString("~p")
+                    let args_list = list_to_cons(args_core)
+                    let io_result = CoreExpr::CoreCall("io_lib", "format", [format_str, args_list])
+                    Option::Some((CoreExpr::CoreCall("lists", "flatten", [io_result]), counter))
+                } else {
+                    if name == "length" {
+                        Option::Some((CoreExpr::CoreCall("erlang", "length", args_core), counter))
+                    } else {
+                        if name == "append" {
+                            Option::Some((CoreExpr::CoreCall("erlang", "++", args_core), counter))
+                        } else {
+                            if name == "reverse" {
+                                Option::Some((CoreExpr::CoreCall("lists", "reverse", args_core), counter))
+                            } else {
+                                if name == "head" {
+                                    Option::Some((CoreExpr::CoreCall("erlang", "hd", args_core), counter))
+                                } else {
+                                    if name == "tail" {
+                                        Option::Some((CoreExpr::CoreCall("erlang", "tl", args_core), counter))
+                                    } else {
+                                        if name == "chars" {
+                                            Option::Some((CoreExpr::CoreCall("string", "to_graphemes", args_core), counter))
+                                        } else {
+                                            if name == "hd" {
+                                                Option::Some((CoreExpr::CoreCall("erlang", "hd", args_core), counter))
+                                            } else {
+                                                if name == "tl" {
+                                                    Option::Some((CoreExpr::CoreCall("erlang", "tl", args_core), counter))
+                                                } else {
+                                                    if name == "binary_to_list" {
+                                                        Option::Some((CoreExpr::CoreCall("erlang", "binary_to_list", args_core), counter))
+                                                    } else {
+                                                        Option::None
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn translate_call(func: Expr, args: List<Expr>, counter: Int) -> (CoreExpr, Int) {
+    let (args_core, c1) = translate_expr_list(args, counter)
+    match func {
+        Expr::ExprVar(name, _) => {
+            // Check if it's a built-in function
+            match translate_builtin(name, args_core, c1) {
+                Option::Some(result) => result,
+                Option::None => {
+                    // Local function call - use function reference with arity
+                    let arity = length(args_core)
+                    (CoreExpr::CoreApply(CoreExpr::CoreFunRef(name, arity), args_core), c1)
+                },
+            }
+        },
+        Expr::ExprPath(segments, _) => {
+            match segments {
+                [type_name, variant_name] => {
+                    // Check if variant_name starts with uppercase (enum constructor)
+                    let first_char = hd(variant_name)
+                    if first_char >= 65 {
+                        if first_char <= 90 {
+                            // Uppercase - this is an enum constructor
+                            // Generate a tuple: {variant_name_lowercase, args...}
+                            let atom = CoreExpr::CoreLitAtom(to_lowercase(variant_name))
+                            (CoreExpr::CoreTuple([atom | args_core]), c1)
+                        } else {
+                            // Not uppercase - module call
+                            (CoreExpr::CoreCall(type_name, variant_name, args_core), c1)
+                        }
+                    } else {
+                        // Lowercase - module function call
+                        (CoreExpr::CoreCall(type_name, variant_name, args_core), c1)
+                    }
+                },
+                _ => {
+                    let (func_core, c2) = translate_expr(func, c1)
+                    (CoreExpr::CoreApply(func_core, args_core), c2)
+                },
+            }
+        },
+        _ => {
+            let (func_core, c2) = translate_expr(func, c1)
+            (CoreExpr::CoreApply(func_core, args_core), c2)
+        },
+    }
+}
+
+fn translate_match_arms(arms: List<MatchArm>, counter: Int) -> (List<CoreClause>, Int) {
+    match arms {
+        [] => ([], counter),
+        [arm | rest] => {
+            let pat_core = translate_pattern(arm.pattern)
+            let guard_core = match arm.guard {
+                Option::Some(g) => {
+                    let (gc, _) = translate_expr(g, counter)
+                    gc
+                },
+                Option::None => CoreExpr::CoreLitAtom("true"),
+            }
+            let (body_core, c1) = translate_expr(arm.body, counter)
+            let clause = CoreClause { pattern: pat_core, guard: guard_core, body: body_core }
+            let (rest_clauses, c2) = translate_match_arms(rest, c1)
+            ([clause | rest_clauses], c2)
+        },
+    }
+}
+
+fn translate_pattern(pat: Pattern) -> CorePattern {
+    match pat {
+        Pattern::PatWildcard(_) => CorePattern::CorePatVar("_"),
+        Pattern::PatVar(name, _) => CorePattern::CorePatVar(mangle_var(name)),
+        Pattern::PatInt(n, _) => CorePattern::CorePatLitInt(n),
+        Pattern::PatAtom(a, _) => CorePattern::CorePatLitAtom(a),
+        Pattern::PatBool(b, _) => CorePattern::CorePatLitAtom(bool_to_atom(b)),
+        Pattern::PatString(s, _) => CorePattern::CorePatLitString(s),
+        Pattern::PatTuple(pats, _) => CorePattern::CorePatTuple([translate_pattern(p) for p in pats]),
+        Pattern::PatList(pats, tail, _) => translate_list_pattern(pats, tail),
+        Pattern::PatConstructor(path, args, _) => {
+            // Extract the variant name from path like ["Option", "Some"]
+            let variant_name = match path {
+                [_, name] => to_lowercase(name),
+                [name] => to_lowercase(name),
+                _ => "unknown",
+            }
+            // Create a tuple pattern: {variant_name, arg1, arg2, ...}
+            let variant_atom = CorePattern::CorePatLitAtom(variant_name)
+            let arg_pats = [translate_pattern(p) for p in args]
+            CorePattern::CorePatTuple([variant_atom | arg_pats])
+        },
+        _ => CorePattern::CorePatVar("_todo"),
+    }
+}
+
+fn translate_list_pattern(pats: List<Pattern>, tail: Option<Pattern>) -> CorePattern {
+    match pats {
+        [] => {
+            match tail {
+                Option::Some(t) => translate_pattern(t),
+                Option::None => CorePattern::CorePatNil,
+            }
+        },
+        [p | rest] => CorePattern::CorePatCons(translate_pattern(p), translate_list_pattern(rest, tail)),
+    }
+}
+
+// Helper functions
+
+fn mangle_var(name: String) -> String {
+    let first = hd(name)
+    let upper_first = if first >= 97 {
+        if first <= 122 {
+            first - 32
+        } else {
+            first
+        }
+    } else {
+        first
+    }
+    let rest = tl(name)
+    // Concatenate single-char string with rest
+    str_concat(char_to_string(upper_first), rest)
+}
+
+fn char_to_string(c: Int) -> String {
+    // A single character as a string
+    // In Erlang, [c] where c is a character code IS a string
+    [c]
+}
+
+fn to_lowercase(s: String) -> String {
+    // Convert first character to lowercase, keep rest as-is
+    let first = hd(s)
+    let lower_first = if first >= 65 {
+        if first <= 90 {
+            first + 32
+        } else {
+            first
+        }
+    } else {
+        first
+    }
+    let rest = tl(s)
+    str_concat(char_to_string(lower_first), rest)
+}
+
+fn bool_to_atom(b: Bool) -> String {
+    if b == true { "true" } else { "false" }
+}
+
+fn binop_to_erlang(op: BinOp) -> (String, String) {
+    match op {
+        BinOp::OpAdd => ("erlang", "+"),
+        BinOp::OpSub => ("erlang", "-"),
+        BinOp::OpMul => ("erlang", "*"),
+        BinOp::OpDiv => ("erlang", "div"),
+        BinOp::OpMod => ("erlang", "rem"),
+        BinOp::OpEq => ("erlang", "=:="),
+        BinOp::OpNotEq => ("erlang", "=/="),
+        BinOp::OpLt => ("erlang", "<"),
+        BinOp::OpLtEq => ("erlang", "=<"),
+        BinOp::OpGt => ("erlang", ">"),
+        BinOp::OpGtEq => ("erlang", ">="),
+        BinOp::OpAnd => ("erlang", "and"),
+        BinOp::OpOr => ("erlang", "or"),
+        BinOp::OpConcat => ("erlang", "++"),
+        BinOp::OpPipe => ("erlang", "error"),
+    }
+}
+
+fn list_to_cons(exprs: List<CoreExpr>) -> CoreExpr {
+    match exprs {
+        [] => CoreExpr::CoreLitNil,
+        [e | rest] => CoreExpr::CoreCons(e, list_to_cons(rest)),
+    }
+}
+
+// Code Emission
+
+fn emit_module(module: CoreModule) -> String {
+    let header = str_concat("module '", str_concat(module.name, "'\n"))
+    let exports = str_concat("    [", str_concat(emit_exports(module.exports), "]\n"))
+    let attrs = "attributes []\n\n"
+    let funs = emit_functions(module.functions)
+    let footer = "end\n"
+    str_concat(header, str_concat(exports, str_concat(attrs, str_concat(funs, footer))))
+}
+
+fn emit_exports(exports: List<(String, Int)>) -> String {
+    match exports {
+        [] => "",
+        [(name, arity)] => str_concat("'", str_concat(name, str_concat("'/", to_string(arity)))),
+        [(name, arity) | rest] => str_concat(str_concat("'", str_concat(name, str_concat("'/", to_string(arity)))), str_concat(", ", emit_exports(rest))),
+    }
+}
+
+fn emit_functions(funs: List<CoreFunDef>) -> String {
+    match funs {
+        [] => "",
+        [f | rest] => str_concat(emit_function(f), str_concat("\n", emit_functions(rest))),
+    }
+}
+
+fn emit_function(f: CoreFunDef) -> String {
+    let sig = str_concat("'", str_concat(f.name, str_concat("'/", str_concat(to_string(f.arity), " = "))))
+    let params = str_concat("fun (", str_concat(emit_params(f.params), ") -> "))
+    let body = emit_expr(f.body)
+    str_concat(sig, str_concat(params, str_concat(body, "\n")))
+}
+
+fn emit_params(params: List<String>) -> String {
+    match params {
+        [] => "",
+        [p] => p,
+        [p | rest] => str_concat(p, str_concat(", ", emit_params(rest))),
+    }
+}
+
+fn escape_string(s: String) -> String {
+    // Escape quotes and backslashes in string for Core Erlang output
+    escape_chars(s)
+}
+
+fn escape_chars(chars: String) -> String {
+    match chars {
+        [] => [],
+        [c | rest] => {
+            if c == 34 {
+                // Double quote -> \"
+                [92 | [34 | escape_chars(rest)]]
+            } else if c == 92 {
+                // Backslash -> \\
+                [92 | [92 | escape_chars(rest)]]
+            } else if c == 10 {
+                // Newline -> \n
+                [92 | [110 | escape_chars(rest)]]
+            } else if c == 9 {
+                // Tab -> \t
+                [92 | [116 | escape_chars(rest)]]
+            } else if c == 13 {
+                // Carriage return -> \r
+                [92 | [114 | escape_chars(rest)]]
+            } else {
+                [c | escape_chars(rest)]
+            }
+        }
+    }
+}
+
+fn emit_expr(expr: CoreExpr) -> String {
+    match expr {
+        CoreExpr::CoreLitInt(n) => to_string(n),
+        CoreExpr::CoreLitFloat(f) => to_string(f),
+        CoreExpr::CoreLitAtom(a) => str_concat("'", str_concat(a, "'")),
+        CoreExpr::CoreLitString(s) => str_concat("\"", str_concat(escape_string(s), "\"")),
+        CoreExpr::CoreLitNil => "[]",
+        CoreExpr::CoreVar(name) => name,
+        CoreExpr::CoreFunRef(name, arity) => str_concat("'", str_concat(name, str_concat("'/", to_string(arity)))),
+        CoreExpr::CoreTuple(exprs) => str_concat("{", str_concat(emit_expr_list(exprs), "}")),
+        CoreExpr::CoreCons(head, tail) => str_concat("[", str_concat(emit_expr(head), str_concat("|", str_concat(emit_expr(tail), "]")))),
+        CoreExpr::CoreFun(params, body) => str_concat("fun (", str_concat(emit_params(params), str_concat(") -> ", emit_expr(body)))),
+        CoreExpr::CoreLet(var, val, body) => str_concat("let <", str_concat(var, str_concat("> = <", str_concat(emit_expr(val), str_concat("> in ", emit_expr(body)))))),
+        CoreExpr::CoreApply(func, args) => str_concat("apply ", str_concat(emit_expr(func), str_concat(" (", str_concat(emit_expr_list(args), ")")))),
+        CoreExpr::CoreCall(mod_name, fun, args) => str_concat("call '", str_concat(mod_name, str_concat("':'", str_concat(fun, str_concat("'(", str_concat(emit_expr_list(args), ")")))))),
+        CoreExpr::CoreCase(scrutinee, clauses) => str_concat("case ", str_concat(emit_expr(scrutinee), str_concat(" of\n", str_concat(emit_clauses(clauses), "end")))),
+        CoreExpr::CoreSeq(first, second) => str_concat("do ", str_concat(emit_expr(first), str_concat("\n", emit_expr(second)))),
+        CoreExpr::CoreMap(pairs) => str_concat("~{", str_concat(emit_map_pairs(pairs), "}~")),
+    }
+}
+
+fn emit_map_pairs(pairs: List<CoreMapPair>) -> String {
+    match pairs {
+        [] => "",
+        [p] => str_concat(emit_expr(p.key), str_concat("=>", emit_expr(p.value))),
+        [p | rest] => str_concat(emit_expr(p.key), str_concat("=>", str_concat(emit_expr(p.value), str_concat(",", emit_map_pairs(rest))))),
+    }
+}
+
+fn emit_expr_list(exprs: List<CoreExpr>) -> String {
+    match exprs {
+        [] => "",
+        [e] => emit_expr(e),
+        [e | rest] => str_concat(emit_expr(e), str_concat(", ", emit_expr_list(rest))),
+    }
+}
+
+fn emit_clauses(clauses: List<CoreClause>) -> String {
+    match clauses {
+        [] => "",
+        [c | rest] => str_concat(emit_clause(c), emit_clauses(rest)),
+    }
+}
+
+fn emit_clause(clause: CoreClause) -> String {
+    let pat = emit_pattern(clause.pattern)
+    let guard = emit_expr(clause.guard)
+    let body = emit_expr(clause.body)
+    str_concat("    <", str_concat(pat, str_concat("> when ", str_concat(guard, str_concat(" -> ", str_concat(body, "\n"))))))
+}
+
+fn emit_pattern(pat: CorePattern) -> String {
+    match pat {
+        CorePattern::CorePatVar(name) => name,
+        CorePattern::CorePatLitInt(n) => to_string(n),
+        CorePattern::CorePatLitAtom(a) => str_concat("'", str_concat(a, "'")),
+        CorePattern::CorePatLitString(s) => str_concat("\"", str_concat(s, "\"")),
+        CorePattern::CorePatTuple(pats) => str_concat("{", str_concat(emit_pattern_list(pats), "}")),
+        CorePattern::CorePatCons(head, tail) => str_concat("[", str_concat(emit_pattern(head), str_concat("|", str_concat(emit_pattern(tail), "]")))),
+        CorePattern::CorePatNil => "[]",
+    }
+}
+
+fn emit_pattern_list(pats: List<CorePattern>) -> String {
+    match pats {
+        [] => "",
+        [p] => emit_pattern(p),
+        [p | rest] => str_concat(emit_pattern(p), str_concat(", ", emit_pattern_list(rest))),
+    }
+}
+
+// High-level translation
+
+fn translate_function(func: Function) -> CoreFunDef {
+    let param_names = [mangle_var(p.name) for p in func.params]
+    let (body_core, _) = translate_expr(func.body, 0)
+    CoreFunDef {
+        name: func.name,
+        arity: length(func.params),
+        params: param_names,
+        body: body_core
+    }
+}
+
+fn extract_functions(items: List<Item>) -> List<Function> {
+    match items {
+        [] => [],
+        [item | rest] => {
+            match item {
+                Item::ItemFunction(f) => [f | extract_functions(rest)],
+                _ => extract_functions(rest),
+            }
+        },
+    }
+}
+
+fn translate_module(module: Module) -> CoreModule {
+    let mod_name = match module.name {
+        Option::Some(n) => n,
+        Option::None => "module",
+    }
+    let functions = extract_functions(module.items)
+    let core_funs = [translate_function(f) for f in functions]
+    let exports = [(f.name, length(f.params)) for f in functions]
+    CoreModule { name: mod_name, exports: exports, functions: core_funs }
+}
+
+// Test
+
+fn main() -> () {
+    let span = Span { start: 0, end_pos: 10 }
+    let x = Expr::ExprVar("x", span)
+    let y = Expr::ExprVar("y", span)
+    let add_expr = Expr::ExprBinary(x, BinOp::OpAdd, y, span)
+
+    let func = Function {
+        name: "add",
+        params: [Param { name: "x", span: span }, Param { name: "y", span: span }],
+        body: add_expr,
+        span: span
+    }
+
+    let module = Module {
+        name: Option::Some("test"),
+        items: [Item::ItemFunction(func)],
+        span: span
+    }
+
+    let core_module = translate_module(module)
+    let output = emit_module(core_module)
+
+    let _ = print("Generated Core Erlang:")
+    let _ = print(output)
+    ()
+}

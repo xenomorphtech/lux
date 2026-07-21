@@ -1,0 +1,99 @@
+// List operations for Lux
+mod list
+
+// Map a function over a list
+fn map(f: fn(Int) -> Int, xs: List<Int>) -> List<Int> {
+    match xs {
+        [] => [],
+        [head | tail] => [f(head) | map(f, tail)]
+    }
+}
+
+// Filter elements that match a predicate
+fn filter(pred: fn(Int) -> Bool, xs: List<Int>) -> List<Int> {
+    match xs {
+        [] => [],
+        [head | tail] => {
+            if pred(head) {
+                [head | filter(pred, tail)]
+            } else {
+                filter(pred, tail)
+            }
+        }
+    }
+}
+
+// Fold left
+fn foldl(f: fn(Int, Int) -> Int, acc: Int, xs: List<Int>) -> Int {
+    match xs {
+        [] => acc,
+        [head | tail] => foldl(f, f(acc, head), tail)
+    }
+}
+
+// Get length of list
+fn length(xs: List<Int>) -> Int {
+    match xs {
+        [] => 0,
+        [_ | tail] => 1 + length(tail)
+    }
+}
+
+// Sum of integers
+fn sum(xs: List<Int>) -> Int {
+    foldl(|acc, x| acc + x, 0, xs)
+}
+
+// Product of integers
+fn product(xs: List<Int>) -> Int {
+    foldl(|acc, x| acc * x, 1, xs)
+}
+
+// Reverse helper
+fn reverse_acc(xs: List<Int>, acc: List<Int>) -> List<Int> {
+    match xs {
+        [] => acc,
+        [head | tail] => reverse_acc(tail, [head | acc])
+    }
+}
+
+// Reverse a list
+fn reverse(xs: List<Int>) -> List<Int> {
+    reverse_acc(xs, [])
+}
+
+// Append two lists
+fn append(xs: List<Int>, ys: List<Int>) -> List<Int> {
+    match xs {
+        [] => ys,
+        [head | tail] => [head | append(tail, ys)]
+    }
+}
+
+// Test
+fn main() -> Int {
+    let nums = [1, 2, 3, 4, 5]
+    
+    // Test sum
+    let total = sum(nums)
+    print(total)
+    
+    // Test map (double)
+    let doubled = map(|x| x * 2, nums)
+    print(doubled)
+    
+    // Test filter (evens from doubled)
+    let evens = filter(|x| x % 2 == 0, doubled)
+    print(evens)
+    
+    // Test length
+    let len = length(nums)
+    print(len)
+    
+    // Test reverse
+    let rev = reverse(nums)
+    print(rev)
+    
+    // Return sum of evens
+    sum(evens)
+}

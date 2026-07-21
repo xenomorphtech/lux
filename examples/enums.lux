@@ -1,0 +1,73 @@
+// Test enum definitions and pattern matching
+mod enums
+
+enum Option {
+    Some(Int),
+    None
+}
+
+enum Result {
+    Ok(Int),
+    Err(String)
+}
+
+enum Expr {
+    Int(Int),
+    Add(Expr, Expr),
+    Mul(Expr, Expr)
+}
+
+fn unwrap_or(opt: Option, default: Int) -> Int {
+    match opt {
+        Option::Some(x) => x,
+        Option::None => default
+    }
+}
+
+fn is_some(opt: Option) -> Bool {
+    match opt {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+fn result_to_string(r: Result) -> String {
+    match r {
+        Result::Ok(n) => to_string(n),
+        Result::Err(msg) => msg
+    }
+}
+
+// Recursive evaluation of expression tree
+fn eval(e: Expr) -> Int {
+    match e {
+        Expr::Int(n) => n,
+        Expr::Add(a, b) => eval(a) + eval(b),
+        Expr::Mul(a, b) => eval(a) * eval(b)
+    }
+}
+
+fn main() -> () {
+    // Option type
+    let some_val = Option::Some(42)
+    let none_val = Option::None
+
+    print(unwrap_or(some_val, 0))
+    print(unwrap_or(none_val, 99))
+    print(is_some(some_val))
+    print(is_some(none_val))
+
+    // Result type
+    let ok = Result::Ok(100)
+    let err = Result::Err("something went wrong")
+    print(result_to_string(ok))
+    print(result_to_string(err))
+
+    // Expression tree (recursive enum!)
+    // (2 + 3) * 4 = 20
+    let expr = Expr::Mul(
+        Expr::Add(Expr::Int(2), Expr::Int(3)),
+        Expr::Int(4)
+    )
+    print(eval(expr))
+}

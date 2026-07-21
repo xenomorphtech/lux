@@ -1,0 +1,29 @@
+// Test pipe operator |>
+mod pipe
+
+fn double(x: Int) -> Int {
+    x * 2
+}
+
+fn add_one(x: Int) -> Int {
+    x + 1
+}
+
+fn main() -> () {
+    // Simple pipe
+    let result = 5 |> double
+    print(result)
+
+    // Chain of pipes
+    let chained = 5 |> double |> add_one |> double
+    print(chained)
+
+    // Pipe with list operations
+    let nums = [1, 2, 3, 4, 5]
+    let sum = nums |> reverse |> hd
+    print(sum)
+
+    // Pipe to stdlib functions
+    let sorted = [3, 1, 4, 1, 5] |> sort |> reverse
+    print(sorted)
+}

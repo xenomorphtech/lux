@@ -1,0 +1,40 @@
+// Test native backend features: closures, deep equality, floats
+mod native_features
+
+fn apply_twice(f: fn(Int) -> Int, x: Int) -> Int {
+    f(f(x))
+}
+
+fn main() -> () {
+    // Test closures with captured variables
+    let multiplier = 3
+    let times = |x| x * multiplier
+    print(times(7))
+
+    // Test passing closure to function
+    print(apply_twice(|x| x + 10, 5))
+
+    // Test list comprehension (uses closures internally)
+    let nums = [1, 2, 3, 4, 5]
+    let doubled = [x * 2 for x in nums]
+    print(doubled)
+
+    // Test deep equality for strings
+    let a = "hello"
+    let b = "hello"
+    print(a == b)
+
+    let c = "hello"
+    let d = "world"
+    print(c == d)
+
+    // Test deep equality for lists
+    print([1, 2, 3] == [1, 2, 3])
+    print([1, 2] == [1, 3])
+
+    // Test float literal and type checks
+    let f = 3.14
+    print(is_float(f))
+    print(is_number(f))
+    print(is_int(f))
+}

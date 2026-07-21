@@ -1,0 +1,36 @@
+// Test cond expression
+mod cond_test
+
+fn classify(x: Int) -> String {
+    cond {
+        x < 0 => "negative",
+        x == 0 => "zero",
+        x < 10 => "small",
+        x < 100 => "medium",
+        true => "large"
+    }
+}
+
+fn fizzbuzz(n: Int) -> String {
+    cond {
+        n % 15 == 0 => "FizzBuzz",
+        n % 3 == 0 => "Fizz",
+        n % 5 == 0 => "Buzz",
+        true => to_string(n)
+    }
+}
+
+fn main() -> () {
+    // Test classify
+    print(classify(-5))
+    print(classify(0))
+    print(classify(5))
+    print(classify(50))
+    print(classify(500))
+
+    // Test fizzbuzz
+    print(fizzbuzz(3))
+    print(fizzbuzz(5))
+    print(fizzbuzz(15))
+    print(fizzbuzz(7))
+}

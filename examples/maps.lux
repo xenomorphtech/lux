@@ -1,0 +1,24 @@
+// Test map literals and access
+mod maptest
+
+fn create_map() {
+    let m = %{:name => "Alice", :city => "NYC"}
+    print(m)
+}
+
+fn number_map() {
+    let squares = %{1 => 1, 2 => 4, 3 => 9, 4 => 16}
+    print(squares)
+}
+
+fn map_access() {
+    let person = %{:name => "Bob", :city => "Paris"}
+    print(person[:name])
+    print(person[:city])
+}
+
+fn main() -> () {
+    create_map()
+    number_map()
+    map_access()
+}

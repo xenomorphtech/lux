@@ -1,0 +1,77 @@
+// Option type for nullable values
+mod option
+
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// Map a function over Option
+fn map_opt(f: fn(Int) -> Int, opt: Option<Int>) -> Option<Int> {
+    match opt {
+        Option::Some(x) => Option::Some(f(x)),
+        Option::None => Option::None
+    }
+}
+
+// Unwrap with default value
+fn unwrap_or(opt: Option<Int>, default: Int) -> Int {
+    match opt {
+        Option::Some(x) => x,
+        Option::None => default
+    }
+}
+
+// Check if Some
+fn is_some(opt: Option<Int>) -> Bool {
+    match opt {
+        Option::Some(_) => true,
+        Option::None => false
+    }
+}
+
+// Check if None
+fn is_none(opt: Option<Int>) -> Bool {
+    match opt {
+        Option::Some(_) => false,
+        Option::None => true
+    }
+}
+
+// Flat map (and_then)
+fn and_then(opt: Option<Int>, f: fn(Int) -> Option<Int>) -> Option<Int> {
+    match opt {
+        Option::Some(x) => f(x),
+        Option::None => Option::None
+    }
+}
+
+// Or else - return first Some or try fallback
+fn or_else(opt: Option<Int>, fallback: fn() -> Option<Int>) -> Option<Int> {
+    match opt {
+        Option::Some(x) => Option::Some(x),
+        Option::None => fallback()
+    }
+}
+
+// Test
+fn main() -> Int {
+    let some_val = Option::Some(42)
+    let none_val = Option::None
+    
+    // Test unwrap_or
+    let a = unwrap_or(some_val, 0)
+    let b = unwrap_or(none_val, 10)
+    print(a)
+    print(b)
+    
+    // Test map
+    let doubled = map_opt(|x| x * 2, some_val)
+    print(unwrap_or(doubled, 0))
+    
+    // Test is_some/is_none
+    print(is_some(some_val))
+    print(is_none(none_val))
+    
+    a + b
+}

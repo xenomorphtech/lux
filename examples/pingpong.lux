@@ -1,0 +1,34 @@
+// Ping-pong example demonstrating message passing
+mod pingpong
+
+// Pong process - responds to pings
+fn pong(count: Int) -> Int {
+    receive {
+        :ping => {
+            print(:pong)
+            pong(count + 1)
+        },
+        :stop => {
+            print(:stopped)
+            count
+        }
+    }
+}
+
+// Ping process - sends pings and receives pongs
+fn ping(n: Int, pong_pid: Pid) -> Int {
+    if n <= 0 {
+        send(pong_pid, :stop)
+        0
+    } else {
+        send(pong_pid, :ping)
+        print(:ping)
+        ping(n - 1, pong_pid)
+    }
+}
+
+fn main() -> Int {
+    let pong_pid = spawn(|| pong(0))
+    ping(3, pong_pid)
+    42
+}

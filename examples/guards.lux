@@ -1,0 +1,18 @@
+// Test pattern guards
+mod guards
+
+fn classify(n: Int) -> Atom {
+    match n {
+        x if x < 0 => :negative,
+        0 => :zero,
+        x if x > 100 => :large,
+        _ => :positive,
+    }
+}
+
+fn main() -> () {
+    print(classify(-5))
+    print(classify(0))
+    print(classify(50))
+    print(classify(200))
+}

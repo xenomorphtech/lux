@@ -1,0 +1,1912 @@
+// Parser for the Lux self-hosted compiler
+mod parser
+
+// ===== Type definitions =====
+
+struct Span {
+    start: Int,
+    end_pos: Int
+}
+
+// Option type
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// Result type for error handling
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// Token kinds (matching lexer.lux)
+enum TokenKind {
+    TokInt(Int),
+    TokChar(Int),
+    TokString(String),
+    TokAtom(String),
+    TokBool(Bool),
+    TokIdent(String),
+    TokTypeIdent(String),
+    TokFn,
+    TokLet,
+    TokIf,
+    TokElse,
+    TokMatch,
+    TokEnum,
+    TokStruct,
+    TokType,
+    TokMod,
+    TokUse,
+    TokCond,
+    TokFor,
+    TokIn,
+    TokExtern,
+    TokPlus,
+    TokPlusPlus,
+    TokMinus,
+    TokStar,
+    TokSlash,
+    TokPercent,
+    TokEq,
+    TokEqEq,
+    TokNotEq,
+    TokLt,
+    TokLtEq,
+    TokGt,
+    TokGtEq,
+    TokArrow,
+    TokFatArrow,
+    TokPipe,
+    TokOr,
+    TokAnd,
+    TokColon,
+    TokColon2,
+    TokLParen,
+    TokRParen,
+    TokLBrace,
+    TokRBrace,
+    TokLBracket,
+    TokRBracket,
+    TokComma,
+    TokDot,
+    TokEof,
+    TokError(String),
+}
+
+struct Token {
+    kind: TokenKind,
+    span: Span
+}
+
+// Binary operators
+enum BinOp {
+    OpAdd,
+    OpSub,
+    OpMul,
+    OpDiv,
+    OpMod,
+    OpConcat,
+    OpEq,
+    OpNotEq,
+    OpLt,
+    OpLtEq,
+    OpGt,
+    OpGtEq,
+    OpOr,
+    OpAnd,
+}
+
+// Type expressions
+enum TypeExpr {
+    TyNamed(String, List<TypeExpr>, Span),
+    TyUnit(Span),
+    TyTuple(List<TypeExpr>, Span),
+}
+
+// Patterns
+enum Pattern {
+    PatWildcard(Span),
+    PatVar(String, Span),
+    PatInt(Int, Span),
+    PatString(String, Span),
+    PatAtom(String, Span),
+    PatList(List<Pattern>, Option<Pattern>, Span),
+    PatConstructor(List<String>, List<Pattern>, Span),
+    PatTuple(List<Pattern>, Span),
+}
+
+// Expressions
+enum Expr {
+    ExprInt(Int, Span),
+    ExprChar(Int, Span),
+    ExprString(String, Span),
+    ExprBool(Bool, Span),
+    ExprAtom(String, Span),
+    ExprUnit(Span),
+    ExprVar(String, Span),
+    ExprBinary(Expr, BinOp, Expr, Span),
+    ExprIf(Expr, Expr, Option<Expr>, Span),
+    ExprMatch(Expr, List<MatchArm>, Span),
+    ExprBlock(List<Stmt>, Option<Expr>, Span),
+    ExprCall(Expr, List<Expr>, Span),
+    ExprFieldAccess(Expr, String, Span),
+    ExprPath(List<String>, Span),
+    ExprStructInit(String, List<FieldInit>, Span),
+    ExprTuple(List<Expr>, Span),
+    ExprList(List<Expr>, Option<Expr>, Span),
+    ExprListComp(Expr, String, Expr, Option<Expr>, Span),
+    ExprCond(List<CondBranch>, Span),
+}
+
+struct CondBranch {
+    condition: Expr,
+    result: Expr,
+    span: Span
+}
+
+struct FieldInit {
+    name: String,
+    value: Expr
+}
+
+struct MatchArm {
+    pattern: Pattern,
+    guard: Option<Expr>,
+    body: Expr,
+    span: Span
+}
+
+enum Stmt {
+    StmtLet(Pattern, Option<TypeExpr>, Expr, Span),
+    StmtExpr(Expr),
+}
+
+struct Param {
+    name: String,
+    ty: Option<TypeExpr>,
+    span: Span
+}
+
+struct Function {
+    name: String,
+    type_params: List<String>,
+    params: List<Param>,
+    return_type: Option<TypeExpr>,
+    body: Expr,
+    span: Span
+}
+
+struct Variant {
+    name: String,
+    fields: List<TypeExpr>,
+    span: Span
+}
+
+struct EnumDef {
+    name: String,
+    type_params: List<String>,
+    variants: List<Variant>,
+    span: Span
+}
+
+struct StructField {
+    name: String,
+    ty: TypeExpr,
+    span: Span
+}
+
+struct StructDef {
+    name: String,
+    type_params: List<String>,
+    fields: List<StructField>,
+    span: Span
+}
+
+enum Item {
+    ItemFunction(Function),
+    ItemEnum(EnumDef),
+    ItemStruct(StructDef),
+}
+
+struct Module {
+    name: Option<String>,
+    items: List<Item>,
+    span: Span
+}
+
+// Parser state
+struct ParseState {
+    tokens: List<Token>,
+    pos: Int
+}
+
+// ===== Parser helpers =====
+
+fn make_span(start: Int, end_pos: Int) -> Span {
+    Span { start: start, end_pos: end_pos }
+}
+
+fn peek(state: ParseState) -> Option<Token> {
+    match state.tokens {
+        [] => Option::None,
+        [tok | _] => Option::Some(tok)
+    }
+}
+
+fn advance(state: ParseState) -> ParseState {
+    match state.tokens {
+        [] => state,
+        [_ | rest] => ParseState { tokens: rest, pos: state.pos + 1 }
+    }
+}
+
+fn current_span(state: ParseState) -> Span {
+    match peek(state) {
+        Option::Some(tok) => tok.span,
+        Option::None => make_span(0, 0)
+    }
+}
+
+fn expect_ident(state: ParseState) -> Result<(String, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokIdent(name) => Result::Ok((name, advance(state))),
+                _ => Result::Err("Expected identifier")
+            }
+        },
+        Option::None => Result::Err("Unexpected end of input")
+    }
+}
+
+fn expect_type_ident(state: ParseState) -> Result<(String, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokTypeIdent(name) => Result::Ok((name, advance(state))),
+                _ => Result::Err("Expected type identifier")
+            }
+        },
+        Option::None => Result::Err("Unexpected end of input")
+    }
+}
+
+fn expect_tok(state: ParseState, expected: TokenKind) -> Result<ParseState, String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            if tok_eq(tok.kind, expected) {
+                Result::Ok(advance(state))
+            } else {
+                Result::Err("Unexpected token")
+            }
+        },
+        Option::None => Result::Err("Unexpected end of input")
+    }
+}
+
+fn tok_eq(a: TokenKind, b: TokenKind) -> Bool {
+    match (a, b) {
+        (TokenKind::TokLParen, TokenKind::TokLParen) => true,
+        (TokenKind::TokRParen, TokenKind::TokRParen) => true,
+        (TokenKind::TokLBrace, TokenKind::TokLBrace) => true,
+        (TokenKind::TokRBrace, TokenKind::TokRBrace) => true,
+        (TokenKind::TokLBracket, TokenKind::TokLBracket) => true,
+        (TokenKind::TokRBracket, TokenKind::TokRBracket) => true,
+        (TokenKind::TokPipe, TokenKind::TokPipe) => true,
+        (TokenKind::TokComma, TokenKind::TokComma) => true,
+        (TokenKind::TokDot, TokenKind::TokDot) => true,
+        (TokenKind::TokColon, TokenKind::TokColon) => true,
+        (TokenKind::TokArrow, TokenKind::TokArrow) => true,
+        (TokenKind::TokFatArrow, TokenKind::TokFatArrow) => true,
+        (TokenKind::TokEq, TokenKind::TokEq) => true,
+        (TokenKind::TokFn, TokenKind::TokFn) => true,
+        (TokenKind::TokLet, TokenKind::TokLet) => true,
+        (TokenKind::TokIf, TokenKind::TokIf) => true,
+        (TokenKind::TokElse, TokenKind::TokElse) => true,
+        (TokenKind::TokMatch, TokenKind::TokMatch) => true,
+        (TokenKind::TokEnum, TokenKind::TokEnum) => true,
+        (TokenKind::TokStruct, TokenKind::TokStruct) => true,
+        (TokenKind::TokMod, TokenKind::TokMod) => true,
+        (TokenKind::TokType, TokenKind::TokType) => true,
+        (TokenKind::TokUse, TokenKind::TokUse) => true,
+        (TokenKind::TokExtern, TokenKind::TokExtern) => true,
+        (TokenKind::TokLt, TokenKind::TokLt) => true,
+        (TokenKind::TokGt, TokenKind::TokGt) => true,
+        (TokenKind::TokColon2, TokenKind::TokColon2) => true,
+        _ => false
+    }
+}
+
+fn is_tok(state: ParseState, expected: TokenKind) -> Bool {
+    match peek(state) {
+        Option::Some(tok) => tok_eq(tok.kind, expected),
+        Option::None => false
+    }
+}
+
+fn is_for_keyword(state: ParseState) -> Bool {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokFor => true,
+                TokenKind::TokIdent(name) => name == "for",
+                _ => false
+            }
+        },
+        Option::None => false
+    }
+}
+
+fn is_in_keyword(state: ParseState) -> Bool {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokIn => true,
+                TokenKind::TokIdent(name) => name == "in",
+                _ => false
+            }
+        },
+        Option::None => false
+    }
+}
+
+// ===== Type parsing =====
+
+fn parse_type(state: ParseState) -> Result<(TypeExpr, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokTypeIdent(name) => {
+                    let s0 = advance(state)
+                    let start = tok.span.start
+                    // Check for type parameters <T, U>
+                    if is_tok(s0, TokenKind::TokLt) {
+                        let s1 = advance(s0)
+                        let (params, s2) = parse_type_params(s1)
+                        match expect_tok(s2, TokenKind::TokGt) {
+                            Result::Ok(s3) => {
+                                let span = make_span(start, current_span(s3).start)
+                                Result::Ok((TypeExpr::TyNamed(name, params, span), s3))
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    } else {
+                        let span = make_span(start, tok.span.end_pos)
+                        Result::Ok((TypeExpr::TyNamed(name, [], span), s0))
+                    }
+                },
+                TokenKind::TokLParen => {
+                    let start = tok.span.start
+                    let s0 = advance(state)
+                    // Check for unit type ()
+                    if is_tok(s0, TokenKind::TokRParen) {
+                        let span = make_span(start, current_span(s0).start)
+                        Result::Ok((TypeExpr::TyUnit(span), advance(s0)))
+                    } else {
+                        // Tuple type (A, B, C)
+                        let (types, s1) = parse_type_list(s0)
+                        match expect_tok(s1, TokenKind::TokRParen) {
+                            Result::Ok(s2) => {
+                                let span = make_span(start, current_span(s2).start)
+                                Result::Ok((TypeExpr::TyTuple(types, span), s2))
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    }
+                },
+                TokenKind::TokLBracket => {
+                    // List type [T]
+                    let start = tok.span.start
+                    let s0 = advance(state)
+                    match parse_type(s0) {
+                        Result::Ok((elem_type, s1)) => {
+                            match expect_tok(s1, TokenKind::TokRBracket) {
+                                Result::Ok(s2) => {
+                                    let span = make_span(start, current_span(s2).start)
+                                    Result::Ok((TypeExpr::TyNamed("List", [elem_type], span), s2))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                _ => Result::Err("Expected type")
+            }
+        },
+        Option::None => Result::Err("Unexpected end of input")
+    }
+}
+
+fn parse_type_list(state: ParseState) -> (List<TypeExpr>, ParseState) {
+    parse_type_params_acc(state, [])
+}
+
+fn parse_type_params(state: ParseState) -> (List<TypeExpr>, ParseState) {
+    parse_type_params_acc(state, [])
+}
+
+fn parse_type_params_acc(state: ParseState, acc: List<TypeExpr>) -> (List<TypeExpr>, ParseState) {
+    match parse_type(state) {
+        Result::Ok((ty, s1)) => {
+            if is_tok(s1, TokenKind::TokComma) {
+                parse_type_params_acc(advance(s1), append_ty(acc, ty))
+            } else {
+                (append_ty(acc, ty), s1)
+            }
+        },
+        Result::Err(_) => (acc, state)
+    }
+}
+
+fn append_ty(xs: List<TypeExpr>, x: TypeExpr) -> List<TypeExpr> {
+    reverse_ty(cons_ty(x, reverse_ty(xs)))
+}
+
+fn cons_ty(x: TypeExpr, xs: List<TypeExpr>) -> List<TypeExpr> {
+    [x | xs]
+}
+
+fn reverse_ty(xs: List<TypeExpr>) -> List<TypeExpr> {
+    reverse_ty_acc(xs, [])
+}
+
+fn reverse_ty_acc(xs: List<TypeExpr>, acc: List<TypeExpr>) -> List<TypeExpr> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_ty_acc(t, [h | acc])
+    }
+}
+
+// ===== Expression parsing =====
+
+fn parse_expr(state: ParseState) -> Result<(Expr, ParseState), String> {
+    parse_logical_or(state)
+}
+
+fn parse_logical_or(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match parse_logical_and(state) {
+        Result::Ok((left, s1)) => parse_logical_or_cont(left, s1),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_logical_or_cont(left: Expr, state: ParseState) -> Result<(Expr, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokOr => {
+                    let s1 = advance(state)
+                    match parse_logical_and(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpOr, right, span)
+                            parse_logical_or_cont(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                _ => Result::Ok((left, state))
+            }
+        },
+        Option::None => Result::Ok((left, state))
+    }
+}
+
+fn parse_logical_and(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match parse_comparison(state) {
+        Result::Ok((left, s1)) => parse_logical_and_cont(left, s1),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_logical_and_cont(left: Expr, state: ParseState) -> Result<(Expr, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokAnd => {
+                    let s1 = advance(state)
+                    match parse_comparison(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpAnd, right, span)
+                            parse_logical_and_cont(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                _ => Result::Ok((left, state))
+            }
+        },
+        Option::None => Result::Ok((left, state))
+    }
+}
+
+fn parse_comparison(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match parse_additive(state) {
+        Result::Ok((left, s1)) => {
+            match peek(s1) {
+                Option::Some(tok) => {
+                    match tok.kind {
+                        TokenKind::TokEqEq => {
+                            let s2 = advance(s1)
+                            match parse_additive(s2) {
+                                Result::Ok((right, s3)) => {
+                                    let span = make_span(0, 0)
+                                    Result::Ok((Expr::ExprBinary(left, BinOp::OpEq, right, span), s3))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        TokenKind::TokLt => {
+                            let s2 = advance(s1)
+                            match parse_additive(s2) {
+                                Result::Ok((right, s3)) => {
+                                    let span = make_span(0, 0)
+                                    Result::Ok((Expr::ExprBinary(left, BinOp::OpLt, right, span), s3))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        TokenKind::TokGt => {
+                            let s2 = advance(s1)
+                            match parse_additive(s2) {
+                                Result::Ok((right, s3)) => {
+                                    let span = make_span(0, 0)
+                                    Result::Ok((Expr::ExprBinary(left, BinOp::OpGt, right, span), s3))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        TokenKind::TokGtEq => {
+                            let s2 = advance(s1)
+                            match parse_additive(s2) {
+                                Result::Ok((right, s3)) => {
+                                    let span = make_span(0, 0)
+                                    Result::Ok((Expr::ExprBinary(left, BinOp::OpGtEq, right, span), s3))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        TokenKind::TokLtEq => {
+                            let s2 = advance(s1)
+                            match parse_additive(s2) {
+                                Result::Ok((right, s3)) => {
+                                    let span = make_span(0, 0)
+                                    Result::Ok((Expr::ExprBinary(left, BinOp::OpLtEq, right, span), s3))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        TokenKind::TokNotEq => {
+                            let s2 = advance(s1)
+                            match parse_additive(s2) {
+                                Result::Ok((right, s3)) => {
+                                    let span = make_span(0, 0)
+                                    Result::Ok((Expr::ExprBinary(left, BinOp::OpNotEq, right, span), s3))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        _ => Result::Ok((left, s1))
+                    }
+                },
+                Option::None => Result::Ok((left, s1))
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_additive(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match parse_multiplicative(state) {
+        Result::Ok((left, s1)) => parse_additive_rest(left, s1),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_additive_rest(left: Expr, state: ParseState) -> Result<(Expr, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokPlus => {
+                    let s1 = advance(state)
+                    match parse_multiplicative(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpAdd, right, span)
+                            parse_additive_rest(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                TokenKind::TokMinus => {
+                    let s1 = advance(state)
+                    match parse_multiplicative(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpSub, right, span)
+                            parse_additive_rest(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                TokenKind::TokPlusPlus => {
+                    let s1 = advance(state)
+                    match parse_multiplicative(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpConcat, right, span)
+                            parse_additive_rest(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                _ => Result::Ok((left, state))
+            }
+        },
+        Option::None => Result::Ok((left, state))
+    }
+}
+
+fn parse_multiplicative(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match parse_call(state) {
+        Result::Ok((left, s1)) => parse_multiplicative_rest(left, s1),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_multiplicative_rest(left: Expr, state: ParseState) -> Result<(Expr, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokStar => {
+                    let s1 = advance(state)
+                    match parse_call(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpMul, right, span)
+                            parse_multiplicative_rest(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                TokenKind::TokSlash => {
+                    let s1 = advance(state)
+                    match parse_call(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpDiv, right, span)
+                            parse_multiplicative_rest(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                TokenKind::TokPercent => {
+                    let s1 = advance(state)
+                    match parse_call(s1) {
+                        Result::Ok((right, s2)) => {
+                            let span = make_span(0, 0)
+                            let expr = Expr::ExprBinary(left, BinOp::OpMod, right, span)
+                            parse_multiplicative_rest(expr, s2)
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                _ => Result::Ok((left, state))
+            }
+        },
+        Option::None => Result::Ok((left, state))
+    }
+}
+
+fn parse_call(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match parse_primary(state) {
+        Result::Ok((expr, s1)) => parse_postfix(expr, s1),
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn is_callable(expr: Expr) -> Bool {
+    // Only these expression types can be directly called as functions
+    // ExprCall is NOT included to prevent `f(x)(y, z)` being parsed as chained call
+    // when `(y, z)` is actually a separate tuple expression in a block
+    match expr {
+        Expr::ExprVar(_n, _s) => true,
+        Expr::ExprPath(_p, _s) => true,
+        Expr::ExprFieldAccess(_e, _f, _s) => true,
+        Expr::ExprLambda(_p, _b, _s) => true,
+        _ => false
+    }
+}
+
+fn parse_postfix(expr: Expr, state: ParseState) -> Result<(Expr, ParseState), String> {
+    if is_tok(state, TokenKind::TokLParen) {
+        // Only treat as function call if expr is callable
+        if is_callable(expr) {
+            // Function call
+            let s1 = advance(state)
+            let (args, s2) = parse_args(s1)
+            match expect_tok(s2, TokenKind::TokRParen) {
+                Result::Ok(s3) => {
+                    let span = make_span(0, 0)
+                    parse_postfix(Expr::ExprCall(expr, args, span), s3)
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        } else {
+            // Not callable - this ( starts a new expression
+            Result::Ok((expr, state))
+        }
+    } else if is_tok(state, TokenKind::TokDot) {
+        // Field access
+        let s1 = advance(state)
+        match peek(s1) {
+            Option::Some(tok) => {
+                match tok.kind {
+                    TokenKind::TokIdent(name) => {
+                        let s2 = advance(s1)
+                        let span = make_span(0, 0)
+                        parse_postfix(Expr::ExprFieldAccess(expr, name, span), s2)
+                    },
+                    _ => Result::Err("Expected field name after '.'")
+                }
+            },
+            Option::None => Result::Err("Unexpected end after '.'")
+        }
+    } else {
+        Result::Ok((expr, state))
+    }
+}
+
+fn parse_args(state: ParseState) -> (List<Expr>, ParseState) {
+    if is_tok(state, TokenKind::TokRParen) {
+        ([], state)
+    } else {
+        parse_args_acc(state, [])
+    }
+}
+
+fn parse_args_acc(state: ParseState, acc: List<Expr>) -> (List<Expr>, ParseState) {
+    match parse_expr(state) {
+        Result::Ok((expr, s1)) => {
+            if is_tok(s1, TokenKind::TokComma) {
+                parse_args_acc(advance(s1), append_expr(acc, expr))
+            } else {
+                (append_expr(acc, expr), s1)
+            }
+        },
+        Result::Err(_) => (acc, state)
+    }
+}
+
+fn append_expr(xs: List<Expr>, x: Expr) -> List<Expr> {
+    reverse_expr([x | reverse_expr(xs)])
+}
+
+fn reverse_expr(xs: List<Expr>) -> List<Expr> {
+    reverse_expr_acc(xs, [])
+}
+
+fn reverse_expr_acc(xs: List<Expr>, acc: List<Expr>) -> List<Expr> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_expr_acc(t, [h | acc])
+    }
+}
+
+// Parse remaining tuple elements after the first comma
+fn parse_tuple_rest(state: ParseState, acc: List<Expr>) -> Result<(List<Expr>, ParseState), String> {
+    match parse_expr(state) {
+        Result::Ok((expr, s1)) => {
+            let new_acc = append_expr(acc, expr)
+            if is_tok(s1, TokenKind::TokComma) {
+                parse_tuple_rest(advance(s1), new_acc)
+            } else {
+                Result::Ok((new_acc, s1))
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+// Parse field initializations: name: expr, name2: expr2
+fn parse_field_inits(state: ParseState) -> Result<(List<FieldInit>, ParseState), String> {
+    if is_tok(state, TokenKind::TokRBrace) {
+        Result::Ok(([], state))
+    } else {
+        parse_field_inits_acc(state, [])
+    }
+}
+
+fn parse_field_inits_acc(state: ParseState, acc: List<FieldInit>) -> Result<(List<FieldInit>, ParseState), String> {
+    // Expect field name
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokIdent(name) => {
+                    let s1 = advance(state)
+                    // Expect colon
+                    match expect_tok(s1, TokenKind::TokColon) {
+                        Result::Ok(s2) => {
+                            // Parse field value
+                            match parse_expr(s2) {
+                                Result::Ok((value, s3)) => {
+                                    let field = FieldInit { name: name, value: value }
+                                    let new_acc = append_field(acc, field)
+                                    // Check for comma to continue
+                                    if is_tok(s3, TokenKind::TokComma) {
+                                        parse_field_inits_acc(advance(s3), new_acc)
+                                    } else {
+                                        Result::Ok((new_acc, s3))
+                                    }
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                _ => Result::Err("Expected field name in struct initialization")
+            }
+        },
+        Option::None => Result::Err("Unexpected end in struct initialization")
+    }
+}
+
+fn append_field(xs: List<FieldInit>, x: FieldInit) -> List<FieldInit> {
+    reverse_field([x | reverse_field(xs)])
+}
+
+fn reverse_field(xs: List<FieldInit>) -> List<FieldInit> {
+    reverse_field_acc(xs, [])
+}
+
+fn reverse_field_acc(xs: List<FieldInit>, acc: List<FieldInit>) -> List<FieldInit> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_field_acc(t, [h | acc])
+    }
+}
+
+fn append_branch(xs: List<CondBranch>, x: CondBranch) -> List<CondBranch> {
+    reverse_branch([x | reverse_branch(xs)])
+}
+
+fn reverse_branch(xs: List<CondBranch>) -> List<CondBranch> {
+    reverse_branch_acc(xs, [])
+}
+
+fn reverse_branch_acc(xs: List<CondBranch>, acc: List<CondBranch>) -> List<CondBranch> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_branch_acc(t, [h | acc])
+    }
+}
+
+fn parse_primary(state: ParseState) -> Result<(Expr, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokInt(n) => {
+                    let span = tok.span
+                    Result::Ok((Expr::ExprInt(n, span), advance(state)))
+                },
+                TokenKind::TokChar(c) => {
+                    let span = tok.span
+                    Result::Ok((Expr::ExprChar(c, span), advance(state)))
+                },
+                TokenKind::TokString(s) => {
+                    let span = tok.span
+                    Result::Ok((Expr::ExprString(s, span), advance(state)))
+                },
+                TokenKind::TokBool(b) => {
+                    let span = tok.span
+                    Result::Ok((Expr::ExprBool(b, span), advance(state)))
+                },
+                TokenKind::TokAtom(a) => {
+                    let span = tok.span
+                    Result::Ok((Expr::ExprAtom(a, span), advance(state)))
+                },
+                TokenKind::TokIdent(name) => {
+                    let s0 = advance(state)
+                    // Check for path like module::function
+                    if is_tok(s0, TokenKind::TokColon2) {
+                        let s1 = advance(s0)
+                        match expect_ident(s1) {
+                            Result::Ok((name2, s2)) => {
+                                let span = make_span(tok.span.start, current_span(s2).start)
+                                let path = Expr::ExprPath([name, name2], span)
+                                // Check for call
+                                if is_tok(s2, TokenKind::TokLParen) {
+                                    let s3 = advance(s2)
+                                    let (args, s4) = parse_args(s3)
+                                    match expect_tok(s4, TokenKind::TokRParen) {
+                                        Result::Ok(s5) => {
+                                            Result::Ok((Expr::ExprCall(path, args, span), s5))
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                } else {
+                                    Result::Ok((path, s2))
+                                }
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    } else {
+                        let span = tok.span
+                        Result::Ok((Expr::ExprVar(name, span), s0))
+                    }
+                },
+                TokenKind::TokTypeIdent(name) => {
+                    // Could be path like Option::Some
+                    let s0 = advance(state)
+                    if is_tok(s0, TokenKind::TokColon2) {
+                        let s1 = advance(s0)
+                        match expect_type_ident(s1) {
+                            Result::Ok((name2, s2)) => {
+                                let span = make_span(tok.span.start, current_span(s2).start)
+                                let path = Expr::ExprPath([name, name2], span)
+                                // Check for arguments
+                                if is_tok(s2, TokenKind::TokLParen) {
+                                    let s3 = advance(s2)
+                                    let (args, s4) = parse_args(s3)
+                                    match expect_tok(s4, TokenKind::TokRParen) {
+                                        Result::Ok(s5) => {
+                                            Result::Ok((Expr::ExprCall(path, args, span), s5))
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                } else {
+                                    Result::Ok((path, s2))
+                                }
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    } else if is_tok(s0, TokenKind::TokLBrace) {
+                        // Struct initialization: TypeName { field: value, ... }
+                        let s1 = advance(s0)
+                        match parse_field_inits(s1) {
+                            Result::Ok((fields, s2)) => {
+                                match expect_tok(s2, TokenKind::TokRBrace) {
+                                    Result::Ok(s3) => {
+                                        let span = make_span(tok.span.start, current_span(s3).start)
+                                        Result::Ok((Expr::ExprStructInit(name, fields, span), s3))
+                                    },
+                                    Result::Err(e) => Result::Err(e)
+                                }
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    } else {
+                        let span = tok.span
+                        Result::Ok((Expr::ExprVar(name, span), s0))
+                    }
+                },
+                TokenKind::TokIf => parse_if(state),
+                TokenKind::TokMatch => parse_match(state),
+                TokenKind::TokCond => parse_cond(state),
+                TokenKind::TokLBrace => parse_block(state),
+                TokenKind::TokLParen => {
+                    let start = tok.span.start
+                    let s0 = advance(state)
+                    // Check for unit expression ()
+                    if is_tok(s0, TokenKind::TokRParen) {
+                        let span = make_span(start, current_span(s0).start)
+                        Result::Ok((Expr::ExprUnit(span), advance(s0)))
+                    } else {
+                        match parse_expr(s0) {
+                            Result::Ok((first_expr, s1)) => {
+                                // Check for tuple (a, b, c)
+                                if is_tok(s1, TokenKind::TokComma) {
+                                    let s2 = advance(s1)
+                                    match parse_tuple_rest(s2, [first_expr]) {
+                                        Result::Ok((exprs, s3)) => {
+                                            match expect_tok(s3, TokenKind::TokRParen) {
+                                                Result::Ok(s4) => {
+                                                    let span = make_span(start, current_span(s4).start)
+                                                    Result::Ok((Expr::ExprTuple(exprs, span), s4))
+                                                },
+                                                Result::Err(e) => Result::Err(e)
+                                            }
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                } else {
+                                    // Single expression in parentheses
+                                    match expect_tok(s1, TokenKind::TokRParen) {
+                                        Result::Ok(s2) => Result::Ok((first_expr, s2)),
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                }
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    }
+                },
+                TokenKind::TokLBracket => {
+                    let start = tok.span.start
+                    let s0 = advance(state)
+                    // Check for empty list []
+                    if is_tok(s0, TokenKind::TokRBracket) {
+                        let span = make_span(start, current_span(s0).start)
+                        Result::Ok((Expr::ExprList([], Option::None, span), advance(s0)))
+                    } else {
+                        // Parse first expression, then check if it's a list comprehension
+                        match parse_expr(s0) {
+                            Result::Ok((first_expr, s1)) => {
+                                // Check for list comprehension: [expr for var in iter]
+                                if is_for_keyword(s1) {
+                                    let s2 = advance(s1)
+                                    match expect_ident(s2) {
+                                        Result::Ok((var_name, s3)) => {
+                                            if is_in_keyword(s3) {
+                                                let s4 = advance(s3)
+                                                match parse_expr(s4) {
+                                                    Result::Ok((iter_expr, s5)) => {
+                                                        // Check for optional filter: if condition
+                                                        let (filter_opt, s6) = if is_tok(s5, TokenKind::TokIf) {
+                                                            let sf = advance(s5)
+                                                            match parse_expr(sf) {
+                                                                Result::Ok((filter_expr, sf2)) => (Option::Some(filter_expr), sf2),
+                                                                Result::Err(_) => (Option::None, s5)
+                                                            }
+                                                        } else {
+                                                            (Option::None, s5)
+                                                        }
+                                                        match expect_tok(s6, TokenKind::TokRBracket) {
+                                                            Result::Ok(s7) => {
+                                                                let span = make_span(start, current_span(s7).start)
+                                                                Result::Ok((Expr::ExprListComp(first_expr, var_name, iter_expr, filter_opt, span), s7))
+                                                            },
+                                                            Result::Err(e) => Result::Err(e)
+                                                        }
+                                                    },
+                                                    Result::Err(e) => Result::Err(e)
+                                                }
+                                            } else {
+                                                Result::Err("Expected 'in' in list comprehension")
+                                            }
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                } else {
+                                    // Regular list: continue with [a, b, c] or [a | rest]
+                                    parse_list_expr_rest(s1, [first_expr], start)
+                                }
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    }
+                },
+                _ => Result::Err("Expected expression")
+            }
+        },
+        Option::None => Result::Err("Unexpected end of input")
+    }
+}
+
+// Parse rest of list expression (after first element is already parsed)
+fn parse_list_expr_rest(state: ParseState, acc: List<Expr>, start: Int) -> Result<(Expr, ParseState), String> {
+    if is_tok(state, TokenKind::TokComma) {
+        // More elements: [a, b, ...]
+        let s1 = advance(state)
+        match parse_expr(s1) {
+            Result::Ok((expr, s2)) => {
+                let new_acc = append_expr(acc, expr)
+                parse_list_expr_rest(s2, new_acc, start)
+            },
+            Result::Err(e) => Result::Err(e)
+        }
+    } else if is_tok(state, TokenKind::TokPipe) {
+        // Cons cell: [a | rest]
+        let s1 = advance(state)
+        match parse_expr(s1) {
+            Result::Ok((tail_expr, s2)) => {
+                match expect_tok(s2, TokenKind::TokRBracket) {
+                    Result::Ok(s3) => {
+                        let span = make_span(start, current_span(s3).start)
+                        Result::Ok((Expr::ExprList(acc, Option::Some(tail_expr), span), s3))
+                    },
+                    Result::Err(e) => Result::Err(e)
+                }
+            },
+            Result::Err(e) => Result::Err(e)
+        }
+    } else {
+        // End of list: [a, b, c]
+        match expect_tok(state, TokenKind::TokRBracket) {
+            Result::Ok(s1) => {
+                let span = make_span(start, current_span(s1).start)
+                Result::Ok((Expr::ExprList(acc, Option::None, span), s1))
+            },
+            Result::Err(e) => Result::Err(e)
+        }
+    }
+}
+
+fn parse_if(state: ParseState) -> Result<(Expr, ParseState), String> {
+    let start = current_span(state).start
+    match expect_tok(state, TokenKind::TokIf) {
+        Result::Ok(s0) => {
+            match parse_expr(s0) {
+                Result::Ok((condition, s1)) => {
+                    match parse_block(s1) {
+                        Result::Ok((then_branch, s2)) => {
+                            if is_tok(s2, TokenKind::TokElse) {
+                                let s3 = advance(s2)
+                                // Check for 'else if' chain
+                                if is_tok(s3, TokenKind::TokIf) {
+                                    match parse_if(s3) {
+                                        Result::Ok((else_if_expr, s4)) => {
+                                            let span = make_span(start, current_span(s4).start)
+                                            Result::Ok((Expr::ExprIf(condition, then_branch, Option::Some(else_if_expr), span), s4))
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                } else {
+                                    match parse_block(s3) {
+                                        Result::Ok((else_branch, s4)) => {
+                                            let span = make_span(start, current_span(s4).start)
+                                            Result::Ok((Expr::ExprIf(condition, then_branch, Option::Some(else_branch), span), s4))
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                }
+                            } else {
+                                let span = make_span(start, current_span(s2).start)
+                                Result::Ok((Expr::ExprIf(condition, then_branch, Option::None, span), s2))
+                            }
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_match(state: ParseState) -> Result<(Expr, ParseState), String> {
+    let start = current_span(state).start
+    match expect_tok(state, TokenKind::TokMatch) {
+        Result::Ok(s0) => {
+            match parse_expr(s0) {
+                Result::Ok((scrutinee, s1)) => {
+                    match expect_tok(s1, TokenKind::TokLBrace) {
+                        Result::Ok(s2) => {
+                            let (arms, s3) = parse_match_arms(s2)
+                            match expect_tok(s3, TokenKind::TokRBrace) {
+                                Result::Ok(s4) => {
+                                    let span = make_span(start, current_span(s4).start)
+                                    Result::Ok((Expr::ExprMatch(scrutinee, arms, span), s4))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_match_arms(state: ParseState) -> (List<MatchArm>, ParseState) {
+    parse_match_arms_acc(state, [])
+}
+
+fn parse_match_arms_acc(state: ParseState, acc: List<MatchArm>) -> (List<MatchArm>, ParseState) {
+    if is_tok(state, TokenKind::TokRBrace) {
+        (reverse_arms(acc), state)
+    } else {
+        match parse_match_arm(state) {
+            Result::Ok((arm, s1)) => {
+                // Optional comma
+                let s2 = if is_tok(s1, TokenKind::TokComma) { advance(s1) } else { s1 }
+                parse_match_arms_acc(s2, [arm | acc])
+            },
+            Result::Err(_) => (reverse_arms(acc), state)
+        }
+    }
+}
+
+fn reverse_arms(xs: List<MatchArm>) -> List<MatchArm> {
+    reverse_arms_acc(xs, [])
+}
+
+fn reverse_arms_acc(xs: List<MatchArm>, acc: List<MatchArm>) -> List<MatchArm> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_arms_acc(t, [h | acc])
+    }
+}
+
+fn parse_match_arm(state: ParseState) -> Result<(MatchArm, ParseState), String> {
+    let start = current_span(state).start
+    match parse_pattern(state) {
+        Result::Ok((pattern, s1)) => {
+            // Check for optional guard: pattern if condition => body
+            let (guard, s2) = if is_tok(s1, TokenKind::TokIf) {
+                let sg = advance(s1)
+                match parse_expr(sg) {
+                    Result::Ok((guard_expr, sg2)) => (Option::Some(guard_expr), sg2),
+                    Result::Err(_) => (Option::None, s1)
+                }
+            } else {
+                (Option::None, s1)
+            }
+            match expect_tok(s2, TokenKind::TokFatArrow) {
+                Result::Ok(s3) => {
+                    match parse_expr(s3) {
+                        Result::Ok((body, s4)) => {
+                            let span = make_span(start, current_span(s4).start)
+                            let arm = MatchArm { pattern: pattern, guard: guard, body: body, span: span }
+                            Result::Ok((arm, s4))
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+// Parse cond expression: cond { condition => result, ... }
+fn parse_cond(state: ParseState) -> Result<(Expr, ParseState), String> {
+    let start = current_span(state).start
+    let s0 = advance(state)  // skip 'cond'
+    match expect_tok(s0, TokenKind::TokLBrace) {
+        Result::Ok(s1) => {
+            let (branches, s2) = parse_cond_branches(s1)
+            match expect_tok(s2, TokenKind::TokRBrace) {
+                Result::Ok(s3) => {
+                    let span = make_span(start, current_span(s3).start)
+                    Result::Ok((Expr::ExprCond(branches, span), s3))
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_cond_branches(state: ParseState) -> (List<CondBranch>, ParseState) {
+    parse_cond_branches_acc(state, [])
+}
+
+fn parse_cond_branches_acc(state: ParseState, acc: List<CondBranch>) -> (List<CondBranch>, ParseState) {
+    // Stop if we hit }
+    if is_tok(state, TokenKind::TokRBrace) {
+        (acc, state)
+    } else {
+        match parse_cond_branch(state) {
+            Result::Ok((branch, s1)) => {
+                let new_acc = append_branch(acc, branch)
+                // Consume optional comma
+                if is_tok(s1, TokenKind::TokComma) {
+                    parse_cond_branches_acc(advance(s1), new_acc)
+                } else {
+                    parse_cond_branches_acc(s1, new_acc)
+                }
+            },
+            Result::Err(_) => (acc, state)
+        }
+    }
+}
+
+fn parse_cond_branch(state: ParseState) -> Result<(CondBranch, ParseState), String> {
+    let start = current_span(state).start
+    match parse_expr(state) {
+        Result::Ok((condition, s1)) => {
+            match expect_tok(s1, TokenKind::TokFatArrow) {
+                Result::Ok(s2) => {
+                    match parse_expr(s2) {
+                        Result::Ok((result, s3)) => {
+                            let span = make_span(start, current_span(s3).start)
+                            let branch = CondBranch { condition: condition, result: result, span: span }
+                            Result::Ok((branch, s3))
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_pattern(state: ParseState) -> Result<(Pattern, ParseState), String> {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokIdent(name) => {
+                    if name == "_" {
+                        Result::Ok((Pattern::PatWildcard(tok.span), advance(state)))
+                    } else {
+                        Result::Ok((Pattern::PatVar(name, tok.span), advance(state)))
+                    }
+                },
+                TokenKind::TokInt(n) => {
+                    Result::Ok((Pattern::PatInt(n, tok.span), advance(state)))
+                },
+                TokenKind::TokChar(c) => {
+                    // Character patterns are just integer patterns
+                    Result::Ok((Pattern::PatInt(c, tok.span), advance(state)))
+                },
+                TokenKind::TokString(s) => {
+                    Result::Ok((Pattern::PatString(s, tok.span), advance(state)))
+                },
+                TokenKind::TokAtom(a) => {
+                    Result::Ok((Pattern::PatAtom(a, tok.span), advance(state)))
+                },
+                TokenKind::TokTypeIdent(name) => {
+                    let s0 = advance(state)
+                    if is_tok(s0, TokenKind::TokColon2) {
+                        let s1 = advance(s0)
+                        match expect_type_ident(s1) {
+                            Result::Ok((variant, s2)) => {
+                                if is_tok(s2, TokenKind::TokLParen) {
+                                    let s3 = advance(s2)
+                                    let (args, s4) = parse_pattern_args(s3)
+                                    match expect_tok(s4, TokenKind::TokRParen) {
+                                        Result::Ok(s5) => {
+                                            let span = make_span(tok.span.start, current_span(s5).start)
+                                            Result::Ok((Pattern::PatConstructor([name, variant], args, span), s5))
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                } else {
+                                    let span = make_span(tok.span.start, current_span(s2).start)
+                                    Result::Ok((Pattern::PatConstructor([name, variant], [], span), s2))
+                                }
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    } else {
+                        Result::Ok((Pattern::PatVar(name, tok.span), s0))
+                    }
+                },
+                TokenKind::TokLBracket => {
+                    let start = tok.span.start
+                    let s0 = advance(state)
+                    // Check for empty list pattern []
+                    if is_tok(s0, TokenKind::TokRBracket) {
+                        let span = make_span(start, current_span(s0).start)
+                        Result::Ok((Pattern::PatList([], Option::None, span), advance(s0)))
+                    } else {
+                        // Parse list patterns: [a], [a, b], [a | rest], [a, b | rest]
+                        parse_list_pattern_elems(s0, [], start)
+                    }
+                },
+                TokenKind::TokLParen => {
+                    // Tuple pattern: (a, b) or (a, b, c)
+                    let start = tok.span.start
+                    let s0 = advance(state)
+                    if is_tok(s0, TokenKind::TokRParen) {
+                        // Unit pattern ()
+                        let span = make_span(start, current_span(s0).start)
+                        Result::Ok((Pattern::PatTuple([], span), advance(s0)))
+                    } else {
+                        parse_tuple_pattern_elems(s0, [], start)
+                    }
+                },
+                _ => Result::Err("Expected pattern")
+            }
+        },
+        Option::None => Result::Err("Unexpected end of input")
+    }
+}
+
+// Parse list pattern elements: [a, b, c] or [a, b | rest]
+fn parse_list_pattern_elems(state: ParseState, acc: List<Pattern>, start: Int) -> Result<(Pattern, ParseState), String> {
+    match parse_pattern(state) {
+        Result::Ok((pat, s1)) => {
+            let new_acc = append_pattern(acc, pat)
+            if is_tok(s1, TokenKind::TokComma) {
+                // More elements coming
+                parse_list_pattern_elems(advance(s1), new_acc, start)
+            } else if is_tok(s1, TokenKind::TokPipe) {
+                // Tail pattern [a, b | rest]
+                let s2 = advance(s1)
+                match parse_pattern(s2) {
+                    Result::Ok((tail_pat, s3)) => {
+                        match expect_tok(s3, TokenKind::TokRBracket) {
+                            Result::Ok(s4) => {
+                                let span = make_span(start, current_span(s4).start)
+                                Result::Ok((Pattern::PatList(new_acc, Option::Some(tail_pat), span), s4))
+                            },
+                            Result::Err(e) => Result::Err(e)
+                        }
+                    },
+                    Result::Err(e) => Result::Err(e)
+                }
+            } else {
+                // End of list [a, b, c]
+                match expect_tok(s1, TokenKind::TokRBracket) {
+                    Result::Ok(s2) => {
+                        let span = make_span(start, current_span(s2).start)
+                        Result::Ok((Pattern::PatList(new_acc, Option::None, span), s2))
+                    },
+                    Result::Err(e) => Result::Err(e)
+                }
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+// Parse tuple pattern elements: (a, b, c)
+fn parse_tuple_pattern_elems(state: ParseState, acc: List<Pattern>, start: Int) -> Result<(Pattern, ParseState), String> {
+    match parse_pattern(state) {
+        Result::Ok((pat, s1)) => {
+            let new_acc = append_pattern(acc, pat)
+            if is_tok(s1, TokenKind::TokComma) {
+                // More elements coming
+                parse_tuple_pattern_elems(advance(s1), new_acc, start)
+            } else {
+                // End of tuple (a, b, c)
+                match expect_tok(s1, TokenKind::TokRParen) {
+                    Result::Ok(s2) => {
+                        let span = make_span(start, current_span(s2).start)
+                        Result::Ok((Pattern::PatTuple(new_acc, span), s2))
+                    },
+                    Result::Err(e) => Result::Err(e)
+                }
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn append_pattern(xs: List<Pattern>, x: Pattern) -> List<Pattern> {
+    reverse_pattern([x | reverse_pattern(xs)])
+}
+
+fn reverse_pattern(xs: List<Pattern>) -> List<Pattern> {
+    reverse_pattern_acc(xs, [])
+}
+
+fn reverse_pattern_acc(xs: List<Pattern>, acc: List<Pattern>) -> List<Pattern> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_pattern_acc(t, [h | acc])
+    }
+}
+
+fn parse_pattern_args(state: ParseState) -> (List<Pattern>, ParseState) {
+    if is_tok(state, TokenKind::TokRParen) {
+        ([], state)
+    } else {
+        parse_pattern_args_acc(state, [])
+    }
+}
+
+fn parse_pattern_args_acc(state: ParseState, acc: List<Pattern>) -> (List<Pattern>, ParseState) {
+    match parse_pattern(state) {
+        Result::Ok((pat, s1)) => {
+            if is_tok(s1, TokenKind::TokComma) {
+                parse_pattern_args_acc(advance(s1), append_pat(acc, pat))
+            } else {
+                (append_pat(acc, pat), s1)
+            }
+        },
+        Result::Err(_) => (acc, state)
+    }
+}
+
+fn append_pat(xs: List<Pattern>, x: Pattern) -> List<Pattern> {
+    reverse_pat([x | reverse_pat(xs)])
+}
+
+fn reverse_pat(xs: List<Pattern>) -> List<Pattern> {
+    reverse_pat_acc(xs, [])
+}
+
+fn reverse_pat_acc(xs: List<Pattern>, acc: List<Pattern>) -> List<Pattern> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_pat_acc(t, [h | acc])
+    }
+}
+
+fn parse_block(state: ParseState) -> Result<(Expr, ParseState), String> {
+    let start = current_span(state).start
+    match expect_tok(state, TokenKind::TokLBrace) {
+        Result::Ok(s0) => {
+            let (stmts, final_expr, s1) = parse_stmts(s0)
+            match expect_tok(s1, TokenKind::TokRBrace) {
+                Result::Ok(s2) => {
+                    let span = make_span(start, current_span(s2).start)
+                    Result::Ok((Expr::ExprBlock(stmts, final_expr, span), s2))
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_stmts(state: ParseState) -> (List<Stmt>, Option<Expr>, ParseState) {
+    parse_stmts_acc(state, [])
+}
+
+fn parse_stmts_acc(state: ParseState, acc: List<Stmt>) -> (List<Stmt>, Option<Expr>, ParseState) {
+    if is_tok(state, TokenKind::TokRBrace) {
+        (reverse_stmts(acc), Option::None, state)
+    } else if is_tok(state, TokenKind::TokLet) {
+        match parse_let(state) {
+            Result::Ok((stmt, s1)) => parse_stmts_acc(s1, [stmt | acc]),
+            Result::Err(_) => (reverse_stmts(acc), Option::None, state)
+        }
+    } else {
+        match parse_expr(state) {
+            Result::Ok((expr, s1)) => {
+                if is_tok(s1, TokenKind::TokRBrace) {
+                    // Last expression is the return value
+                    (reverse_stmts(acc), Option::Some(expr), s1)
+                } else {
+                    // Expression statement
+                    parse_stmts_acc(s1, [Stmt::StmtExpr(expr) | acc])
+                }
+            },
+            Result::Err(_) => (reverse_stmts(acc), Option::None, state)
+        }
+    }
+}
+
+fn reverse_stmts(xs: List<Stmt>) -> List<Stmt> {
+    reverse_stmts_acc(xs, [])
+}
+
+fn reverse_stmts_acc(xs: List<Stmt>, acc: List<Stmt>) -> List<Stmt> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_stmts_acc(t, [h | acc])
+    }
+}
+
+fn parse_let(state: ParseState) -> Result<(Stmt, ParseState), String> {
+    let start = current_span(state).start
+    match expect_tok(state, TokenKind::TokLet) {
+        Result::Ok(s0) => {
+            match parse_pattern(s0) {
+                Result::Ok((pattern, s1)) => {
+                    // Optional type annotation
+                    let (ty, s2) = if is_tok(s1, TokenKind::TokColon) {
+                        let s1a = advance(s1)
+                        match parse_type(s1a) {
+                            Result::Ok((t, s1b)) => (Option::Some(t), s1b),
+                            Result::Err(_) => (Option::None, s1)
+                        }
+                    } else {
+                        (Option::None, s1)
+                    }
+                    match expect_tok(s2, TokenKind::TokEq) {
+                        Result::Ok(s3) => {
+                            match parse_expr(s3) {
+                                Result::Ok((value, s4)) => {
+                                    let span = make_span(start, current_span(s4).start)
+                                    Result::Ok((Stmt::StmtLet(pattern, ty, value, span), s4))
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+// ===== Item parsing =====
+
+fn parse_function(state: ParseState) -> Result<(Function, ParseState), String> {
+    let start = current_span(state).start
+    match expect_tok(state, TokenKind::TokFn) {
+        Result::Ok(s0) => {
+            match expect_ident(s0) {
+                Result::Ok((name, s1)) => {
+                    match expect_tok(s1, TokenKind::TokLParen) {
+                        Result::Ok(s2) => {
+                            let (params, s3) = parse_params(s2)
+                            match expect_tok(s3, TokenKind::TokRParen) {
+                                Result::Ok(s4) => {
+                                    // Optional return type
+                                    let (ret_ty, s5) = if is_tok(s4, TokenKind::TokArrow) {
+                                        let s4a = advance(s4)
+                                        match parse_type(s4a) {
+                                            Result::Ok((ty, s4b)) => (Option::Some(ty), s4b),
+                                            Result::Err(_) => (Option::None, s4)
+                                        }
+                                    } else {
+                                        (Option::None, s4)
+                                    }
+                                    match parse_block(s5) {
+                                        Result::Ok((body, s6)) => {
+                                            let span = make_span(start, current_span(s6).start)
+                                            let func = Function {
+                                                name: name,
+                                                type_params: [],
+                                                params: params,
+                                                return_type: ret_ty,
+                                                body: body,
+                                                span: span
+                                            }
+                                            Result::Ok((func, s6))
+                                        },
+                                        Result::Err(e) => Result::Err(e)
+                                    }
+                                },
+                                Result::Err(e) => Result::Err(e)
+                            }
+                        },
+                        Result::Err(e) => Result::Err(e)
+                    }
+                },
+                Result::Err(e) => Result::Err(e)
+            }
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn parse_params(state: ParseState) -> (List<Param>, ParseState) {
+    if is_tok(state, TokenKind::TokRParen) {
+        ([], state)
+    } else {
+        parse_params_acc(state, [])
+    }
+}
+
+fn parse_params_acc(state: ParseState, acc: List<Param>) -> (List<Param>, ParseState) {
+    match parse_param(state) {
+        Result::Ok((param, s1)) => {
+            if is_tok(s1, TokenKind::TokComma) {
+                parse_params_acc(advance(s1), append_param(acc, param))
+            } else {
+                (append_param(acc, param), s1)
+            }
+        },
+        Result::Err(_) => (acc, state)
+    }
+}
+
+fn parse_param(state: ParseState) -> Result<(Param, ParseState), String> {
+    let start = current_span(state).start
+    match expect_ident(state) {
+        Result::Ok((name, s1)) => {
+            // Optional type annotation
+            let (ty, s2) = if is_tok(s1, TokenKind::TokColon) {
+                let s1a = advance(s1)
+                match parse_type(s1a) {
+                    Result::Ok((t, s1b)) => (Option::Some(t), s1b),
+                    Result::Err(_) => (Option::None, s1)
+                }
+            } else {
+                (Option::None, s1)
+            }
+            let span = make_span(start, current_span(s2).start)
+            let param = Param { name: name, ty: ty, span: span }
+            Result::Ok((param, s2))
+        },
+        Result::Err(e) => Result::Err(e)
+    }
+}
+
+fn append_param(xs: List<Param>, x: Param) -> List<Param> {
+    reverse_param([x | reverse_param(xs)])
+}
+
+fn reverse_param(xs: List<Param>) -> List<Param> {
+    reverse_param_acc(xs, [])
+}
+
+fn reverse_param_acc(xs: List<Param>, acc: List<Param>) -> List<Param> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_param_acc(t, [h | acc])
+    }
+}
+
+// ===== Main parser =====
+
+fn parse_mod_name(state: ParseState) -> (Option<String>, ParseState) {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokMod => {
+                    let s1 = advance(state)
+                    match peek(s1) {
+                        Option::Some(tok2) => {
+                            match tok2.kind {
+                                TokenKind::TokIdent(name) => (Option::Some(name), advance(s1)),
+                                _ => (Option::None, state),
+                            }
+                        },
+                        Option::None => (Option::None, state),
+                    }
+                },
+                _ => (Option::None, state),
+            }
+        },
+        Option::None => (Option::None, state),
+    }
+}
+
+fn parse(tokens: List<Token>) -> Result<Module, String> {
+    let state = ParseState { tokens: tokens, pos: 0 }
+    // Try to parse module name
+    let (mod_name, s1) = parse_mod_name(state)
+    let (items, s2) = parse_items(s1)
+    let span = make_span(0, current_span(s2).start)
+    Result::Ok(Module { name: mod_name, items: items, span: span })
+}
+
+fn skip_until_brace_end(state: ParseState) -> ParseState {
+    // Skip tokens until we see { and then match the closing }
+    skip_until_brace_end_helper(state, 0)
+}
+
+fn skip_until_brace_end_helper(state: ParseState, depth: Int) -> ParseState {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokLBrace => skip_until_brace_end_helper(advance(state), depth + 1),
+                TokenKind::TokRBrace => {
+                    if depth <= 1 {
+                        advance(state)
+                    } else {
+                        skip_until_brace_end_helper(advance(state), depth - 1)
+                    }
+                },
+                TokenKind::TokEof => state,
+                _ => skip_until_brace_end_helper(advance(state), depth),
+            }
+        },
+        Option::None => state,
+    }
+}
+
+fn skip_until_newline_or_brace(state: ParseState) -> ParseState {
+    // Skip tokens until we see a brace-start item (fn, struct, enum, etc) or EOF
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokFn => state,
+                TokenKind::TokStruct => state,
+                TokenKind::TokEnum => state,
+                TokenKind::TokType => state,
+                TokenKind::TokEof => state,
+                _ => skip_until_newline_or_brace(advance(state)),
+            }
+        },
+        Option::None => state,
+    }
+}
+
+fn parse_items(state: ParseState) -> (List<Item>, ParseState) {
+    parse_items_acc(state, [])
+}
+
+fn parse_items_acc(state: ParseState, acc: List<Item>) -> (List<Item>, ParseState) {
+    match peek(state) {
+        Option::Some(tok) => {
+            match tok.kind {
+                TokenKind::TokFn => {
+                    match parse_function(state) {
+                        Result::Ok((func, s1)) => {
+                            parse_items_acc(s1, [Item::ItemFunction(func) | acc])
+                        },
+                        Result::Err(_) => (reverse_items(acc), state)
+                    }
+                },
+                TokenKind::TokEof => (reverse_items(acc), state),
+                TokenKind::TokStruct => {
+                    // Skip struct definition: struct Name { ... }
+                    let s1 = skip_until_brace_end(advance(state))
+                    parse_items_acc(s1, acc)
+                },
+                TokenKind::TokEnum => {
+                    // Skip enum definition: enum Name { ... }
+                    let s1 = skip_until_brace_end(advance(state))
+                    parse_items_acc(s1, acc)
+                },
+                TokenKind::TokType => {
+                    // Skip type alias: type Name = ...
+                    let s1 = skip_until_newline_or_brace(advance(state))
+                    parse_items_acc(s1, acc)
+                },
+                TokenKind::TokUse => {
+                    // Skip use declaration
+                    let s1 = skip_until_newline_or_brace(advance(state))
+                    parse_items_acc(s1, acc)
+                },
+                TokenKind::TokExtern => {
+                    // Skip extern block: extern "erlang" { ... }
+                    let s1 = skip_until_brace_end(advance(state))
+                    parse_items_acc(s1, acc)
+                },
+                _ => {
+                    // Skip unknown token
+                    parse_items_acc(advance(state), acc)
+                }
+            }
+        },
+        Option::None => (reverse_items(acc), state)
+    }
+}
+
+fn reverse_items(xs: List<Item>) -> List<Item> {
+    reverse_items_acc(xs, [])
+}
+
+fn reverse_items_acc(xs: List<Item>, acc: List<Item>) -> List<Item> {
+    match xs {
+        [] => acc,
+        [h | t] => reverse_items_acc(t, [h | acc])
+    }
+}
+
+// Test
+fn main() -> () {
+    // Test parsing a simple expression
+    let expr_tokens = [
+        Token { kind: TokenKind::TokInt(1), span: Span { start: 0, end_pos: 1 } },
+        Token { kind: TokenKind::TokPlus, span: Span { start: 2, end_pos: 3 } },
+        Token { kind: TokenKind::TokInt(2), span: Span { start: 4, end_pos: 5 } },
+        Token { kind: TokenKind::TokEof, span: Span { start: 5, end_pos: 5 } }
+    ]
+    let state = ParseState { tokens: expr_tokens, pos: 0 }
+    let _ = match parse_expr(state) {
+        Result::Ok((expr, _)) => {
+            let _ = print("Parsed expression:")
+            let _ = print(expr)
+            ()
+        },
+        Result::Err(e) => {
+            let _ = print("Error: ${e}")
+            ()
+        },
+    }
+
+    // Test parsing a simple function
+    let func_tokens = [
+        Token { kind: TokenKind::TokFn, span: Span { start: 0, end_pos: 2 } },
+        Token { kind: TokenKind::TokIdent("add"), span: Span { start: 3, end_pos: 6 } },
+        Token { kind: TokenKind::TokLParen, span: Span { start: 6, end_pos: 7 } },
+        Token { kind: TokenKind::TokIdent("a"), span: Span { start: 7, end_pos: 8 } },
+        Token { kind: TokenKind::TokComma, span: Span { start: 8, end_pos: 9 } },
+        Token { kind: TokenKind::TokIdent("b"), span: Span { start: 10, end_pos: 11 } },
+        Token { kind: TokenKind::TokRParen, span: Span { start: 11, end_pos: 12 } },
+        Token { kind: TokenKind::TokLBrace, span: Span { start: 13, end_pos: 14 } },
+        Token { kind: TokenKind::TokIdent("a"), span: Span { start: 15, end_pos: 16 } },
+        Token { kind: TokenKind::TokPlus, span: Span { start: 17, end_pos: 18 } },
+        Token { kind: TokenKind::TokIdent("b"), span: Span { start: 19, end_pos: 20 } },
+        Token { kind: TokenKind::TokRBrace, span: Span { start: 21, end_pos: 22 } },
+        Token { kind: TokenKind::TokEof, span: Span { start: 22, end_pos: 22 } }
+    ]
+    let _ = match parse(func_tokens) {
+        Result::Ok(module) => {
+            let _ = print("Parsed module:")
+            let _ = print(module)
+            ()
+        },
+        Result::Err(e) => {
+            let _ = print("Error: ${e}")
+            ()
+        },
+    }
+    ()
+}

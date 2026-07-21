@@ -1,0 +1,79 @@
+// OTP JSON usage through Lux's Dynamic layer.
+mod json
+
+fn decode_name(payload: Dynamic) -> DynamicResult<String> {
+    decode_field(payload, "name", |value| dynamic_string_result(value))
+}
+
+fn decode_second_item(payload: Dynamic) -> DynamicResult<Int> {
+    decode_field(payload, "items", |items| {
+        decode_index(items, 2, |value| dynamic_int_result(value))
+    })
+}
+
+fn decode_numbers(payload: Dynamic) -> DynamicResult<List<Int>> {
+    decode_field(payload, "items", |items| {
+        decode_list(items, |value| dynamic_int_result(value))
+    })
+}
+
+fn decode_title(payload: Dynamic) -> DynamicResult<String> {
+    decode_field(payload, "title", |value| {
+        decode_one_of(
+            value,
+            |text| dynamic_string_result(text),
+            |number| decode_map(dynamic_int_result(number), |n| str_from_chars(integer_to_list(n)))
+        )
+    })
+}
+
+fn decode_nickname(payload: Dynamic) -> DynamicResult<DynamicOption<String>> {
+    decode_optional_field(payload, "nickname", |item| dynamic_string_result(item))
+}
+
+fn decode_scores(payload: Dynamic) -> DynamicResult<Map<String, Int>> {
+    decode_field(payload, "scores", |value| {
+        decode_dict(value, |item| dynamic_int_result(item))
+    })
+}
+
+fn decode_mode(payload: Dynamic) -> DynamicResult<String> {
+    decode_field_or(payload, "mode", "demo", |value| dynamic_string_result(value))
+}
+
+fn title_error_is_structured(payload: Dynamic) -> Bool {
+    match decode_field(payload, "title", |value| dynamic_string_result(value)) {
+        DynamicResult::Err(
+            DecodeError::At(
+                DecodePathItem::Field(field),
+                DecodeError::Expected(kind)
+            )
+        ) => field == "title" && kind == "string",
+        _ => false
+    }
+}
+
+fn main() -> Bool {
+    let decoded: Dynamic =
+        dynamic_json_decode("{\"name\":\"Lux\",\"ok\":true,\"count\":3,\"items\":[1,2,3],\"title\":7,\"nickname\":null,\"scores\":{\"a\":1,\"b\":2}}")
+    print(decoded)
+
+    let encoded =
+        dynamic_json_encode(dynamic(%{"status" => "ok", "mode" => "demo"}))
+    print(encoded)
+
+    match (decode_name(decoded), decode_second_item(decoded), decode_numbers(decoded), decode_title(decoded), decode_nickname(decoded), decode_scores(decoded), decode_mode(decoded)) {
+        (DynamicResult::Ok(name), DynamicResult::Ok(second), DynamicResult::Ok(numbers), DynamicResult::Ok(title), DynamicResult::Ok(DynamicOption::None), DynamicResult::Ok(scores), DynamicResult::Ok(mode)) => {
+            name == "Lux" &&
+            second == 2 &&
+            nth(3, numbers) == 3 &&
+            title == "7" &&
+            map_get(scores, "b") == 2 &&
+            mode == "demo" &&
+            title_error_is_structured(decoded) &&
+            str_contains(encoded, "\"status\":\"ok\"") &&
+            str_contains(encoded, "\"mode\":\"demo\"")
+        },
+        _ => false
+    }
+}

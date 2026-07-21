@@ -1,0 +1,19 @@
+// Test range expressions
+mod range
+
+fn exclusive_range() -> [Int] {
+    1..5
+}
+
+fn inclusive_range() -> [Int] {
+    1..=5
+}
+
+fn main() -> () {
+    print(exclusive_range())
+    print(inclusive_range())
+
+    // Use range in list comprehension
+    let squares = [x * x for x in 1..=5]
+    print(squares)
+}

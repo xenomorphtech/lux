@@ -1,0 +1,30 @@
+// Test unless expression
+mod unless_test
+
+fn check_empty(list: [Int]) -> String {
+    unless length(list) == 0 {
+        "list has items"
+    } else {
+        "list is empty"
+    }
+}
+
+fn main() -> () {
+    // unless with else
+    let x = 5
+    let result = unless x > 10 {
+        "x is not greater than 10"
+    } else {
+        "x is greater than 10"
+    }
+    print(result)
+
+    // unless without else (returns Unit)
+    unless x == 0 {
+        print("x is not zero")
+    }
+
+    // Test with function
+    print(check_empty([1, 2, 3]))
+    print(check_empty([]))
+}

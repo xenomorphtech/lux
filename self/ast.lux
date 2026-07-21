@@ -1,0 +1,219 @@
+// AST definitions for the Lux self-hosted compiler
+mod ast
+
+// Span represents source location
+struct Span {
+    start: Int,
+    end_pos: Int
+}
+
+// Option type
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// Binary operators
+enum BinOp {
+    OpAdd,
+    OpSub,
+    OpMul,
+    OpDiv,
+    OpMod,
+    OpEq,
+    OpNotEq,
+    OpLt,
+    OpLtEq,
+    OpGt,
+    OpGtEq,
+    OpAnd,
+    OpOr,
+    OpConcat,
+    OpPipe,
+}
+
+// Unary operators
+enum UnaryOp {
+    OpNeg,
+    OpNot,
+}
+
+// Type expressions
+enum TypeExpr {
+    // Named type: Int, Option<T>
+    TyNamed(String, List<TypeExpr>, Span),
+    // Tuple: (A, B)
+    TyTuple(List<TypeExpr>, Span),
+    // Function: fn(A) -> B
+    TyFunc(List<TypeExpr>, TypeExpr, Span),
+    // Unit: ()
+    TyUnit(Span),
+}
+
+// Patterns
+enum Pattern {
+    PatWildcard(Span),
+    PatVar(String, Span),
+    PatInt(Int, Span),
+    PatString(String, Span),
+    PatBool(Bool, Span),
+    PatAtom(String, Span),
+    PatTuple(List<Pattern>, Span),
+    PatList(List<Pattern>, Option<Pattern>, Span),
+    PatConstructor(List<String>, List<Pattern>, Span),
+}
+
+// Expressions
+enum Expr {
+    // Literals
+    ExprInt(Int, Span),
+    ExprFloat(Float, Span),
+    ExprString(String, Span),
+    ExprBool(Bool, Span),
+    ExprAtom(String, Span),
+    ExprUnit(Span),
+    // Variable
+    ExprVar(String, Span),
+    // Compound
+    ExprTuple(List<Expr>, Span),
+    ExprList(List<Expr>, Option<Expr>, Span),
+    // Operations
+    ExprBinary(Expr, BinOp, Expr, Span),
+    ExprUnary(UnaryOp, Expr, Span),
+    // Control flow
+    ExprIf(Expr, Expr, Option<Expr>, Span),
+    ExprMatch(Expr, List<MatchArm>, Span),
+    ExprBlock(List<Stmt>, Option<Expr>, Span),
+    // Functions
+    ExprCall(Expr, List<Expr>, Span),
+    ExprLambda(List<Param>, Option<TypeExpr>, Expr, Span),
+    // Field access
+    ExprField(Expr, String, Span),
+    ExprPath(List<String>, Span),
+    // Struct init
+    ExprStructInit(String, List<FieldInit>, Span),
+    // Process
+    ExprSpawn(Expr, Span),
+    ExprSend(Expr, Expr, Span),
+    ExprReceive(List<MatchArm>, Option<ReceiveTimeout>, Span),
+    ExprSelf(Span),
+}
+
+// Struct field initialization
+struct FieldInit {
+    name: String,
+    value: Expr
+}
+
+// Receive timeout
+struct ReceiveTimeout {
+    timeout: Expr,
+    body: Expr
+}
+
+// Match arm
+struct MatchArm {
+    pattern: Pattern,
+    guard: Option<Expr>,
+    body: Expr,
+    span: Span
+}
+
+// Statement
+enum Stmt {
+    StmtLet(Pattern, Option<TypeExpr>, Expr, Span),
+    StmtExpr(Expr),
+}
+
+// Function parameter
+struct Param {
+    name: String,
+    ty: Option<TypeExpr>,
+    span: Span
+}
+
+// Function definition
+struct Function {
+    name: String,
+    type_params: List<String>,
+    params: List<Param>,
+    return_type: Option<TypeExpr>,
+    body: Expr,
+    span: Span
+}
+
+// Enum variant
+struct Variant {
+    name: String,
+    fields: List<TypeExpr>,
+    span: Span
+}
+
+// Enum definition
+struct EnumDef {
+    name: String,
+    type_params: List<String>,
+    variants: List<Variant>,
+    span: Span
+}
+
+// Struct field
+struct StructField {
+    name: String,
+    ty: TypeExpr,
+    span: Span
+}
+
+// Struct definition
+struct StructDef {
+    name: String,
+    type_params: List<String>,
+    fields: List<StructField>,
+    span: Span
+}
+
+// Type alias
+struct TypeAlias {
+    name: String,
+    type_params: List<String>,
+    ty: TypeExpr,
+    span: Span
+}
+
+// Top-level items
+enum Item {
+    ItemFunction(Function),
+    ItemEnum(EnumDef),
+    ItemStruct(StructDef),
+    ItemTypeAlias(TypeAlias),
+}
+
+// Module
+struct Module {
+    name: Option<String>,
+    items: List<Item>,
+    span: Span
+}
+
+// Create a span
+fn make_span(start: Int, end_pos: Int) -> Span {
+    Span { start: start, end_pos: end_pos }
+}
+
+// Test
+fn main() -> () {
+    // Create a simple AST node
+    let span = make_span(0, 10)
+    let expr = Expr::ExprInt(42, span)
+    print(expr)
+
+    // Create a pattern
+    let pat = Pattern::PatVar("x", span)
+    print(pat)
+
+    // Create a binary expression
+    let left = Expr::ExprInt(1, span)
+    let right = Expr::ExprInt(2, span)
+    let bin = Expr::ExprBinary(left, BinOp::OpAdd, right, span)
+    print(bin)
+}

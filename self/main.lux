@@ -1,0 +1,171 @@
+// Lux self-hosted compiler driver
+// This module orchestrates lexer, parser, and codegen
+mod main
+
+// FFI for file operations
+extern "erlang" {
+    fn file::read_file(String) -> (Atom, String)
+    fn file::write_file(String, String) -> Atom
+    fn os::cmd(String) -> String
+    fn init::get_plain_arguments() -> List<String>
+    fn filename::basename(String, String) -> String
+    fn filename::rootname(String) -> String
+}
+
+// FFI for calling other compiler modules (once they're compiled)
+extern "erlang" {
+    fn lexer::tokenize(String) -> List<Any>
+    fn parser::parse(List<Any>) -> Any
+    fn codegen::translate_module(Any) -> Any
+    fn codegen::emit_module(Any) -> String
+}
+
+// Option type for error handling
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+fn read_file(path: String) -> Result<String, String> {
+    match file::read_file(path) {
+        (:ok, content) => Result::Ok(binary_to_list(content)),
+        (:error, reason) => Result::Err(to_string(reason)),
+    }
+}
+
+fn write_file(path: String, content: String) -> Result<Atom, String> {
+    match file::write_file(path, content) {
+        :ok => Result::Ok(:ok),
+        _ => Result::Err("Failed to write file"),
+    }
+}
+
+fn compile_source(source: String, module_name: String) -> Result<String, String> {
+    // Step 1: Tokenize
+    let tokens = lexer::tokenize(source)
+    let _ = print("Tokens generated")
+
+    // Step 2: Parse (returns {ok, ast} or {error, msg})
+    let parse_result = parser::parse(tokens)
+    match parse_result {
+        (:ok, ast) => {
+            let _ = print("AST generated")
+
+            // Step 3: Translate to Core Erlang AST
+            let core_module = codegen::translate_module(ast)
+            let _ = print("Core Erlang AST generated")
+
+            // Step 4: Emit Core Erlang text
+            let core_text = codegen::emit_module(core_module)
+            let _ = print("Core Erlang text generated")
+
+            Result::Ok(core_text)
+        },
+        (:error, msg) => Result::Err(to_string(msg)),
+        _ => Result::Err("Unknown parse error"),
+    }
+}
+
+fn get_module_name(path: String) -> String {
+    // Extract base name without extension
+    let base = filename::basename(path, ".lux")
+    base
+}
+
+fn compile_file(input_path: String) -> Result<String, String> {
+    // Read source file
+    match read_file(input_path) {
+        Result::Ok(source) => {
+            let module_name = get_module_name(input_path)
+            compile_source(source, module_name)
+        },
+        Result::Err(e) => Result::Err(str_concat("Failed to read file: ", e)),
+    }
+}
+
+fn compile_to_beam(input_path: String) -> Result<String, String> {
+    let _ = print(str_concat("Compiling: ", input_path))
+
+    match compile_file(input_path) {
+        Result::Ok(core_text) => {
+            // Write .core file
+            let module_name = get_module_name(input_path)
+            let core_path = str_concat(module_name, ".core")
+
+            match write_file(core_path, core_text) {
+                Result::Ok(_) => {
+                    let _ = print(str_concat("Generated: ", core_path))
+
+                    // Compile with erlc
+                    let cmd = str_concat("erlc +from_core ", core_path)
+                    let _ = os::cmd(cmd)
+
+                    let beam_path = str_concat(module_name, ".beam")
+                    let _ = print(str_concat("Generated: ", beam_path))
+                    Result::Ok(beam_path)
+                },
+                Result::Err(e) => Result::Err(str_concat("Failed to write core file: ", e)),
+            }
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+fn print_usage() -> () {
+    let _ = print("Lux Self-Hosted Compiler")
+    let _ = print("========================")
+    let _ = print("")
+    let _ = print("Usage: erl -noshell -s main main -extra <file.lux>")
+    let _ = print("")
+    let _ = print("Or run demo: erl -noshell -s main demo")
+    ()
+}
+
+fn demo() -> () {
+    let source = "mod example
+
+fn add(x: Int, y: Int) -> Int {
+    x + y
+}
+"
+    let _ = print("Lux Self-Hosted Compiler - Demo")
+    let _ = print("===============================")
+    let _ = print("")
+
+    match compile_source(source, "example") {
+        Result::Ok(core_text) => {
+            let _ = print("Compilation successful!")
+            let _ = print("")
+            let _ = print("Generated Core Erlang:")
+            let _ = print(core_text)
+            ()
+        },
+        Result::Err(e) => {
+            let _ = print("Compilation failed:")
+            let _ = print(e)
+            ()
+        },
+    }
+}
+
+fn main() -> () {
+    let args = init::get_plain_arguments()
+    match args {
+        [] => print_usage(),
+        [path | _] => {
+            match compile_to_beam(path) {
+                Result::Ok(beam_path) => {
+                    let _ = print("")
+                    let _ = print("Compilation successful!")
+                    ()
+                },
+                Result::Err(e) => {
+                    let _ = print("")
+                    let _ = print("Compilation failed:")
+                    let _ = print(e)
+                    ()
+                },
+            }
+        },
+    }
+}

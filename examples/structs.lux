@@ -1,0 +1,45 @@
+// Test struct definitions
+mod structs
+
+struct Point {
+    x: Int,
+    y: Int
+}
+
+struct Person {
+    name: String,
+    age: Int
+}
+
+fn make_point(x: Int, y: Int) -> Point {
+    Point { x: x, y: y }
+}
+
+fn distance_squared(p1: Point, p2: Point) -> Int {
+    let dx = p1.x - p2.x
+    let dy = p1.y - p2.y
+    dx * dx + dy * dy
+}
+
+fn greet(p: Person) -> String {
+    "Hello, " ++ p.name
+}
+
+fn main() -> () {
+    // Create struct instances
+    let origin = Point { x: 0, y: 0 }
+    let p = Point { x: 3, y: 4 }
+
+    // Access fields
+    print(p.x)
+    print(p.y)
+
+    // Use in functions
+    let p2 = make_point(6, 8)
+    print(distance_squared(origin, p2))
+
+    // Person struct
+    let alice = Person { name: "Alice", age: 30 }
+    print(greet(alice))
+    print(alice.age)
+}

@@ -1,0 +1,162 @@
+// Token definitions for the Lux self-hosted compiler
+mod token
+
+// Span represents source location
+struct Span {
+    start: Int,
+    end_pos: Int
+}
+
+// Token kinds
+enum TokenKind {
+    // Literals
+    TokInt(Int),
+    TokFloat(Float),
+    TokChar(Int),
+    TokString(String),
+    TokAtom(String),
+    TokBool(Bool),
+
+    // Identifiers
+    TokIdent(String),
+    TokTypeIdent(String),
+
+    // Keywords
+    TokFn,
+    TokLet,
+    TokIf,
+    TokUnless,
+    TokCond,
+    TokElse,
+    TokMatch,
+    TokEnum,
+    TokStruct,
+    TokType,
+    TokMod,
+    TokUse,
+    TokSpawn,
+    TokSend,
+    TokReceive,
+    TokAfter,
+    TokFor,
+    TokIn,
+    TokTry,
+    TokCatch,
+    TokSelfKw,
+    TokExtern,
+    TokReturn,
+    TokPub,
+
+    // Operators
+    TokPlus,
+    TokPlusPlus,
+    TokMinus,
+    TokStar,
+    TokSlash,
+    TokPercent,
+    TokEq,
+    TokEqEq,
+    TokNotEq,
+    TokLt,
+    TokLtEq,
+    TokLtLt,
+    TokGt,
+    TokGtEq,
+    TokGtGt,
+    TokAnd,
+    TokOr,
+    TokNot,
+    TokArrow,
+    TokFatArrow,
+    TokPipe,
+    TokPipeRight,
+    TokHashBrace,
+    TokColon2,
+
+    // Delimiters
+    TokLParen,
+    TokRParen,
+    TokLBrace,
+    TokRBrace,
+    TokLBracket,
+    TokRBracket,
+    TokComma,
+    TokColon,
+    TokSemi,
+    TokDot,
+    TokDotDot,
+    TokDotDotEq,
+
+    // Special
+    TokEof,
+    TokError(String),
+    TokNewline,
+}
+
+// Token with kind and span
+struct Token {
+    kind: TokenKind,
+    span: Span
+}
+
+// Create a new token
+fn make_token(kind: TokenKind, start: Int, end_pos: Int) -> Token {
+    Token { kind: kind, span: Span { start: start, end_pos: end_pos } }
+}
+
+// Create a span
+fn make_span(start: Int, end_pos: Int) -> Span {
+    Span { start: start, end_pos: end_pos }
+}
+
+// Option type for keyword lookup
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+// Check if a string is a keyword and return the token kind
+fn keyword(s: String) -> Option<TokenKind> {
+    match s {
+        "fn" => Option::Some(TokenKind::TokFn),
+        "let" => Option::Some(TokenKind::TokLet),
+        "if" => Option::Some(TokenKind::TokIf),
+        "unless" => Option::Some(TokenKind::TokUnless),
+        "cond" => Option::Some(TokenKind::TokCond),
+        "else" => Option::Some(TokenKind::TokElse),
+        "match" => Option::Some(TokenKind::TokMatch),
+        "enum" => Option::Some(TokenKind::TokEnum),
+        "struct" => Option::Some(TokenKind::TokStruct),
+        "type" => Option::Some(TokenKind::TokType),
+        "mod" => Option::Some(TokenKind::TokMod),
+        "use" => Option::Some(TokenKind::TokUse),
+        "spawn" => Option::Some(TokenKind::TokSpawn),
+        "send" => Option::Some(TokenKind::TokSend),
+        "receive" => Option::Some(TokenKind::TokReceive),
+        "after" => Option::Some(TokenKind::TokAfter),
+        "for" => Option::Some(TokenKind::TokFor),
+        "in" => Option::Some(TokenKind::TokIn),
+        "try" => Option::Some(TokenKind::TokTry),
+        "catch" => Option::Some(TokenKind::TokCatch),
+        "self" => Option::Some(TokenKind::TokSelfKw),
+        "extern" => Option::Some(TokenKind::TokExtern),
+        "return" => Option::Some(TokenKind::TokReturn),
+        "pub" => Option::Some(TokenKind::TokPub),
+        "true" => Option::Some(TokenKind::TokBool(true)),
+        "false" => Option::Some(TokenKind::TokBool(false)),
+        _ => Option::None
+    }
+}
+
+// Test
+fn main() -> () {
+    let tok = make_token(TokenKind::TokFn, 0, 2)
+    let _ = print(tok)
+
+    let kw = keyword("fn")
+    let _ = print(kw)
+
+    let not_kw = keyword("hello")
+    let _ = print(not_kw)
+    ()
+}

@@ -1,0 +1,37 @@
+// Test system utilities: argv, env, process dictionary, chars
+mod sysutil
+
+fn main() -> () {
+    // Command line arguments
+    let args = argv()
+    print("Arguments:")
+    print(args)
+
+    // Environment variables
+    let home = env("HOME")
+    print("HOME:")
+    print(home)
+
+    // Process dictionary (mutable state)
+    put(:counter, 0)
+    print(get(:counter))
+
+    put(:counter, 1)
+    print(get(:counter))
+
+    put(:counter, get(:counter) + 1)
+    print(get(:counter))
+
+    // Char literals
+    let a = 'a'
+    let newline = '\n'
+    let tab = '\t'
+    print(a)           // 97 (ASCII code)
+    print(newline)     // 10
+    print(tab)         // 9
+
+    // Char to int conversion
+    print('A')         // 65
+    print('Z')         // 90
+    print('0')         // 48
+}
