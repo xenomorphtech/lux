@@ -1,0 +1,998 @@
+// A small, pure IPv4/TCP stack. The transport boundary is a complete IPv4
+// packet represented as a Lux String (an arbitrary binary), which keeps packet
+// ownership and NIC I/O outside the protocol state machine.
+mod tcp_ip
+
+struct Ipv4Address {
+    a: Int,
+    b: Int,
+    c: Int,
+    d: Int
+}
+
+struct Ipv4Packet {
+    source: Ipv4Address,
+    destination: Ipv4Address,
+    dscp_ecn: Int,
+    identification: Int,
+    ttl: Int,
+    dont_fragment: Bool,
+    payload: String
+}
+
+struct TcpSegment {
+    source_port: Int,
+    destination_port: Int,
+    sequence: Int,
+    acknowledgment: Int,
+    flags: Int,
+    window: Int,
+    urgent_pointer: Int,
+    payload: String
+}
+
+enum Ipv4Parse {
+    Ok(Ipv4Packet),
+    Error(Int)
+}
+
+enum TcpParse {
+    Ok(TcpSegment),
+    Error(Int)
+}
+
+enum PacketParse {
+    Ok(Ipv4Packet, TcpSegment),
+    Error(Int)
+}
+
+enum TcpState {
+    Closed,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    Closing,
+    TimeWait,
+    CloseWait,
+    LastAck
+}
+
+struct TcpConnection {
+    state: TcpState,
+    local_address: Ipv4Address,
+    remote_address: Ipv4Address,
+    local_port: Int,
+    remote_port: Int,
+    send_unacknowledged: Int,
+    send_next: Int,
+    receive_next: Int,
+    initial_send_sequence: Int,
+    initial_receive_sequence: Int,
+    receive_window: Int,
+    next_ip_identification: Int
+}
+
+// event: 0=no event/drop, 1=connected, 2=data, 3=peer closed,
+// 4=reset, 5=locally closed.
+struct TcpStep {
+    connection: TcpConnection,
+    outbound: String,
+    delivered: String,
+    event: Int
+}
+
+fn empty_binary() -> String {
+    <<"">>
+}
+
+fn byte_at(bytes: [Int], index: Int) -> Int {
+    if index == 0 {
+        hd(bytes)
+    } else {
+        byte_at(tl(bytes), index - 1)
+    }
+}
+
+fn u16_at(bytes: [Int], index: Int) -> Int {
+    bsl(byte_at(bytes, index), 8) + byte_at(bytes, index + 1)
+}
+
+fn u32_at(bytes: [Int], index: Int) -> Int {
+    bsl(byte_at(bytes, index), 24)
+        + bsl(byte_at(bytes, index + 1), 16)
+        + bsl(byte_at(bytes, index + 2), 8)
+        + byte_at(bytes, index + 3)
+}
+
+fn hi16(value: Int) -> Int {
+    band(bsr(value, 8), 255)
+}
+
+fn lo8(value: Int) -> Int {
+    band(value, 255)
+}
+
+fn u32_b0(value: Int) -> Int {
+    band(bsr(value, 24), 255)
+}
+
+fn u32_b1(value: Int) -> Int {
+    band(bsr(value, 16), 255)
+}
+
+fn u32_b2(value: Int) -> Int {
+    band(bsr(value, 8), 255)
+}
+
+fn u32_b3(value: Int) -> Int {
+    band(value, 255)
+}
+
+fn fold_carries(value: Int) -> Int {
+    let folded = band(value, 65535) + bsr(value, 16)
+    if bsr(folded, 16) == 0 {
+        folded
+    } else {
+        fold_carries(folded)
+    }
+}
+
+fn checksum_words(bytes: [Int], sum: Int) -> Int {
+    match bytes {
+        [] => band(bnot(fold_carries(sum)), 65535),
+        [high] => band(bnot(fold_carries(sum + bsl(high, 8))), 65535),
+        [high, low | rest] => checksum_words(
+            rest,
+            fold_carries(sum + bsl(high, 8) + low)
+        )
+    }
+}
+
+fn internet_checksum(packet: String) -> Int {
+    checksum_words(binary_to_list(packet), 0)
+}
+
+fn address_bytes(address: Ipv4Address) -> [Int] {
+    [address.a, address.b, address.c, address.d]
+}
+
+fn same_address(left: Ipv4Address, right: Ipv4Address) -> Bool {
+    left.a == right.a
+        && left.b == right.b
+        && left.c == right.c
+        && left.d == right.d
+}
+
+fn unspecified_address() -> Ipv4Address {
+    Ipv4Address { a: 0, b: 0, c: 0, d: 0 }
+}
+
+fn encode_ipv4(packet: Ipv4Packet) -> String {
+    let total_length = 20 + byte_size(packet.payload)
+    let fragment = if packet.dont_fragment { 16384 } else { 0 }
+    let source = packet.source
+    let destination = packet.destination
+    let header_without_checksum = list_to_binary([
+        69,
+        band(packet.dscp_ecn, 255),
+        hi16(total_length), lo8(total_length),
+        hi16(packet.identification), lo8(packet.identification),
+        hi16(fragment), lo8(fragment),
+        band(packet.ttl, 255),
+        6,
+        0, 0,
+        source.a, source.b, source.c, source.d,
+        destination.a, destination.b, destination.c, destination.d
+    ])
+    let checksum = internet_checksum(header_without_checksum)
+    let header = list_to_binary([
+        69,
+        band(packet.dscp_ecn, 255),
+        hi16(total_length), lo8(total_length),
+        hi16(packet.identification), lo8(packet.identification),
+        hi16(fragment), lo8(fragment),
+        band(packet.ttl, 255),
+        6,
+        hi16(checksum), lo8(checksum),
+        source.a, source.b, source.c, source.d,
+        destination.a, destination.b, destination.c, destination.d
+    ])
+    header ++ packet.payload
+}
+
+fn parse_ipv4(packet: String) -> Ipv4Parse {
+    let packet_length = byte_size(packet)
+    if packet_length < 20 {
+        Ipv4Parse::Error(1)
+    } else {
+        let bytes = binary_to_list(packet)
+        let version_ihl = byte_at(bytes, 0)
+        let version = bsr(version_ihl, 4)
+        let header_length = band(version_ihl, 15) * 4
+        let total_length = u16_at(bytes, 2)
+        let fragment = u16_at(bytes, 6)
+        cond {
+            version != 4 => Ipv4Parse::Error(2),
+            header_length < 20 => Ipv4Parse::Error(3),
+            header_length > packet_length => Ipv4Parse::Error(3),
+            total_length < header_length => Ipv4Parse::Error(4),
+            total_length > packet_length => Ipv4Parse::Error(4),
+            byte_at(bytes, 9) != 6 => Ipv4Parse::Error(5),
+            band(fragment, 16383) != 0 => Ipv4Parse::Error(6),
+            internet_checksum(binary_slice(packet, 0, header_length)) != 0 => Ipv4Parse::Error(7),
+            true => Ipv4Parse::Ok(Ipv4Packet {
+                source: Ipv4Address {
+                    a: byte_at(bytes, 12),
+                    b: byte_at(bytes, 13),
+                    c: byte_at(bytes, 14),
+                    d: byte_at(bytes, 15)
+                },
+                destination: Ipv4Address {
+                    a: byte_at(bytes, 16),
+                    b: byte_at(bytes, 17),
+                    c: byte_at(bytes, 18),
+                    d: byte_at(bytes, 19)
+                },
+                dscp_ecn: byte_at(bytes, 1),
+                identification: u16_at(bytes, 4),
+                ttl: byte_at(bytes, 8),
+                dont_fragment: band(fragment, 16384) != 0,
+                payload: binary_slice(packet, header_length, total_length - header_length)
+            })
+        }
+    }
+}
+
+fn tcp_pseudo_header(
+    source: Ipv4Address,
+    destination: Ipv4Address,
+    tcp_length: Int
+) -> String {
+    list_to_binary(append(
+        address_bytes(source),
+        append(address_bytes(destination), [0, 6, hi16(tcp_length), lo8(tcp_length)])
+    ))
+}
+
+fn encode_tcp(
+    source: Ipv4Address,
+    destination: Ipv4Address,
+    segment: TcpSegment
+) -> String {
+    let tcp_length = 20 + byte_size(segment.payload)
+    let offset_and_ns = bor(80, band(bsr(segment.flags, 8), 1))
+    let low_flags = band(segment.flags, 255)
+    let header_without_checksum = list_to_binary([
+        hi16(segment.source_port), lo8(segment.source_port),
+        hi16(segment.destination_port), lo8(segment.destination_port),
+        u32_b0(segment.sequence), u32_b1(segment.sequence),
+        u32_b2(segment.sequence), u32_b3(segment.sequence),
+        u32_b0(segment.acknowledgment), u32_b1(segment.acknowledgment),
+        u32_b2(segment.acknowledgment), u32_b3(segment.acknowledgment),
+        offset_and_ns, low_flags,
+        hi16(segment.window), lo8(segment.window),
+        0, 0,
+        hi16(segment.urgent_pointer), lo8(segment.urgent_pointer)
+    ])
+    let checksum_input = tcp_pseudo_header(source, destination, tcp_length)
+        ++ header_without_checksum
+        ++ segment.payload
+    let checksum = internet_checksum(checksum_input)
+    let header = list_to_binary([
+        hi16(segment.source_port), lo8(segment.source_port),
+        hi16(segment.destination_port), lo8(segment.destination_port),
+        u32_b0(segment.sequence), u32_b1(segment.sequence),
+        u32_b2(segment.sequence), u32_b3(segment.sequence),
+        u32_b0(segment.acknowledgment), u32_b1(segment.acknowledgment),
+        u32_b2(segment.acknowledgment), u32_b3(segment.acknowledgment),
+        offset_and_ns, low_flags,
+        hi16(segment.window), lo8(segment.window),
+        hi16(checksum), lo8(checksum),
+        hi16(segment.urgent_pointer), lo8(segment.urgent_pointer)
+    ])
+    header ++ segment.payload
+}
+
+fn parse_tcp(ip: Ipv4Packet) -> TcpParse {
+    let tcp_length = byte_size(ip.payload)
+    if tcp_length < 20 {
+        TcpParse::Error(20)
+    } else {
+        let bytes = binary_to_list(ip.payload)
+        let header_length = bsr(byte_at(bytes, 12), 4) * 4
+        let checksum_input = tcp_pseudo_header(ip.source, ip.destination, tcp_length)
+            ++ ip.payload
+        cond {
+            header_length < 20 => TcpParse::Error(21),
+            header_length > tcp_length => TcpParse::Error(21),
+            internet_checksum(checksum_input) != 0 => TcpParse::Error(22),
+            true => TcpParse::Ok(TcpSegment {
+                source_port: u16_at(bytes, 0),
+                destination_port: u16_at(bytes, 2),
+                sequence: u32_at(bytes, 4),
+                acknowledgment: u32_at(bytes, 8),
+                flags: bor(bsl(band(byte_at(bytes, 12), 1), 8), byte_at(bytes, 13)),
+                window: u16_at(bytes, 14),
+                urgent_pointer: u16_at(bytes, 18),
+                payload: binary_slice(ip.payload, header_length, tcp_length - header_length)
+            })
+        }
+    }
+}
+
+fn parse_packet(packet: String) -> PacketParse {
+    match parse_ipv4(packet) {
+        Ipv4Parse::Error(reason) => PacketParse::Error(reason),
+        Ipv4Parse::Ok(ip) => match parse_tcp(ip) {
+            TcpParse::Error(reason) => PacketParse::Error(reason),
+            TcpParse::Ok(tcp) => PacketParse::Ok(ip, tcp)
+        }
+    }
+}
+
+fn seq_add(sequence: Int, amount: Int) -> Int {
+    band(sequence + amount, 4294967295)
+}
+
+fn has_flag(flags: Int, flag: Int) -> Bool {
+    band(flags, flag) != 0
+}
+
+fn make_connection(
+    state: TcpState,
+    local_address: Ipv4Address,
+    remote_address: Ipv4Address,
+    local_port: Int,
+    remote_port: Int,
+    send_unacknowledged: Int,
+    send_next: Int,
+    receive_next: Int,
+    initial_send_sequence: Int,
+    initial_receive_sequence: Int,
+    receive_window: Int,
+    next_ip_identification: Int
+) -> TcpConnection {
+    TcpConnection {
+        state: state,
+        local_address: local_address,
+        remote_address: remote_address,
+        local_port: local_port,
+        remote_port: remote_port,
+        send_unacknowledged: send_unacknowledged,
+        send_next: send_next,
+        receive_next: receive_next,
+        initial_send_sequence: initial_send_sequence,
+        initial_receive_sequence: initial_receive_sequence,
+        receive_window: receive_window,
+        next_ip_identification: next_ip_identification
+    }
+}
+
+fn listening(
+    local_address: Ipv4Address,
+    local_port: Int,
+    initial_sequence: Int
+) -> TcpConnection {
+    make_connection(
+        TcpState::Listen,
+        local_address,
+        unspecified_address(),
+        local_port,
+        0,
+        initial_sequence,
+        initial_sequence,
+        0,
+        initial_sequence,
+        0,
+        65535,
+        1
+    )
+}
+
+fn packet_from_segment(connection: TcpConnection, segment: TcpSegment) -> String {
+    let tcp = encode_tcp(connection.local_address, connection.remote_address, segment)
+    encode_ipv4(Ipv4Packet {
+        source: connection.local_address,
+        destination: connection.remote_address,
+        dscp_ecn: 0,
+        identification: connection.next_ip_identification,
+        ttl: 64,
+        dont_fragment: true,
+        payload: tcp
+    })
+}
+
+fn emit(
+    connection: TcpConnection,
+    sequence: Int,
+    acknowledgment: Int,
+    flags: Int,
+    payload: String
+) -> String {
+    packet_from_segment(connection, TcpSegment {
+        source_port: connection.local_port,
+        destination_port: connection.remote_port,
+        sequence: sequence,
+        acknowledgment: acknowledgment,
+        flags: flags,
+        window: connection.receive_window,
+        urgent_pointer: 0,
+        payload: payload
+    })
+}
+
+fn no_output(connection: TcpConnection, event: Int) -> TcpStep {
+    TcpStep {
+        connection: connection,
+        outbound: empty_binary(),
+        delivered: empty_binary(),
+        event: event
+    }
+}
+
+fn with_output(
+    connection: TcpConnection,
+    outbound: String,
+    delivered: String,
+    event: Int
+) -> TcpStep {
+    TcpStep {
+        connection: connection,
+        outbound: outbound,
+        delivered: delivered,
+        event: event
+    }
+}
+
+fn connect(
+    local_address: Ipv4Address,
+    local_port: Int,
+    remote_address: Ipv4Address,
+    remote_port: Int,
+    initial_sequence: Int
+) -> TcpStep {
+    let connection = make_connection(
+        TcpState::SynSent,
+        local_address,
+        remote_address,
+        local_port,
+        remote_port,
+        initial_sequence,
+        seq_add(initial_sequence, 1),
+        0,
+        initial_sequence,
+        0,
+        65535,
+        1
+    )
+    with_output(
+        connection,
+        emit(connection, initial_sequence, 0, 2, empty_binary()),
+        empty_binary(),
+        0
+    )
+}
+
+fn ack_is_acceptable(connection: TcpConnection, acknowledgment: Int) -> Bool {
+    acknowledgment >= connection.send_unacknowledged
+        && acknowledgment <= connection.send_next
+}
+
+fn accept_ack(connection: TcpConnection, acknowledgment: Int) -> TcpConnection {
+    let next_unacknowledged = if ack_is_acceptable(connection, acknowledgment) {
+        acknowledgment
+    } else {
+        connection.send_unacknowledged
+    }
+    make_connection(
+        connection.state,
+        connection.local_address,
+        connection.remote_address,
+        connection.local_port,
+        connection.remote_port,
+        next_unacknowledged,
+        connection.send_next,
+        connection.receive_next,
+        connection.initial_send_sequence,
+        connection.initial_receive_sequence,
+        connection.receive_window,
+        connection.next_ip_identification
+    )
+}
+
+fn advance_ip_id(connection: TcpConnection, state: TcpState) -> TcpConnection {
+    make_connection(
+        state,
+        connection.local_address,
+        connection.remote_address,
+        connection.local_port,
+        connection.remote_port,
+        connection.send_unacknowledged,
+        connection.send_next,
+        connection.receive_next,
+        connection.initial_send_sequence,
+        connection.initial_receive_sequence,
+        connection.receive_window,
+        band(connection.next_ip_identification + 1, 65535)
+    )
+}
+
+fn reset_connection(connection: TcpConnection) -> TcpConnection {
+    make_connection(
+        TcpState::Closed,
+        connection.local_address,
+        connection.remote_address,
+        connection.local_port,
+        connection.remote_port,
+        connection.send_unacknowledged,
+        connection.send_next,
+        connection.receive_next,
+        connection.initial_send_sequence,
+        connection.initial_receive_sequence,
+        connection.receive_window,
+        connection.next_ip_identification
+    )
+}
+
+fn handle_listen(
+    connection: TcpConnection,
+    ip: Ipv4Packet,
+    segment: TcpSegment
+) -> TcpStep {
+    if has_flag(segment.flags, 4) {
+        no_output(connection, 0)
+    } else if has_flag(segment.flags, 2) {
+        let receive_next = seq_add(segment.sequence, 1)
+        let next = make_connection(
+            TcpState::SynReceived,
+            connection.local_address,
+            ip.source,
+            connection.local_port,
+            segment.source_port,
+            connection.initial_send_sequence,
+            seq_add(connection.initial_send_sequence, 1),
+            receive_next,
+            connection.initial_send_sequence,
+            segment.sequence,
+            connection.receive_window,
+            connection.next_ip_identification
+        )
+        let outbound = emit(next, connection.initial_send_sequence, receive_next, 18, empty_binary())
+        with_output(advance_ip_id(next, TcpState::SynReceived), outbound, empty_binary(), 0)
+    } else {
+        no_output(connection, 0)
+    }
+}
+
+fn handle_syn_sent(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    if has_flag(segment.flags, 4) {
+        no_output(reset_connection(connection), 4)
+    } else if has_flag(segment.flags, 2)
+        && has_flag(segment.flags, 16)
+        && segment.acknowledgment == connection.send_next {
+        let receive_next = seq_add(segment.sequence, 1)
+        let next = make_connection(
+            TcpState::Established,
+            connection.local_address,
+            connection.remote_address,
+            connection.local_port,
+            connection.remote_port,
+            segment.acknowledgment,
+            connection.send_next,
+            receive_next,
+            connection.initial_send_sequence,
+            segment.sequence,
+            connection.receive_window,
+            connection.next_ip_identification
+        )
+        let outbound = emit(next, next.send_next, receive_next, 16, empty_binary())
+        with_output(advance_ip_id(next, TcpState::Established), outbound, empty_binary(), 1)
+    } else {
+        no_output(connection, 0)
+    }
+}
+
+fn handle_syn_received(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    if has_flag(segment.flags, 4) {
+        no_output(reset_connection(connection), 4)
+    } else if has_flag(segment.flags, 16)
+        && segment.acknowledgment == connection.send_next {
+        let acknowledged = accept_ack(connection, segment.acknowledgment)
+        let established = make_connection(
+            TcpState::Established,
+            acknowledged.local_address,
+            acknowledged.remote_address,
+            acknowledged.local_port,
+            acknowledged.remote_port,
+            acknowledged.send_unacknowledged,
+            acknowledged.send_next,
+            acknowledged.receive_next,
+            acknowledged.initial_send_sequence,
+            acknowledged.initial_receive_sequence,
+            acknowledged.receive_window,
+            acknowledged.next_ip_identification
+        )
+        no_output(established, 1)
+    } else {
+        no_output(connection, 0)
+    }
+}
+
+fn receive_payload(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    let payload_length = byte_size(segment.payload)
+    let has_fin = has_flag(segment.flags, 1)
+    let consumed = payload_length + if has_fin { 1 } else { 0 }
+    if segment.sequence != connection.receive_next {
+        let outbound = emit(
+            connection,
+            connection.send_next,
+            connection.receive_next,
+            16,
+            empty_binary()
+        )
+        with_output(
+            advance_ip_id(connection, connection.state),
+            outbound,
+            empty_binary(),
+            0
+        )
+    } else if consumed == 0 {
+        no_output(accept_ack(connection, segment.acknowledgment), 0)
+    } else {
+        let acknowledged = accept_ack(connection, segment.acknowledgment)
+        let next_state = if has_fin { TcpState::CloseWait } else { TcpState::Established }
+        let next = make_connection(
+            next_state,
+            acknowledged.local_address,
+            acknowledged.remote_address,
+            acknowledged.local_port,
+            acknowledged.remote_port,
+            acknowledged.send_unacknowledged,
+            acknowledged.send_next,
+            seq_add(acknowledged.receive_next, consumed),
+            acknowledged.initial_send_sequence,
+            acknowledged.initial_receive_sequence,
+            acknowledged.receive_window,
+            acknowledged.next_ip_identification
+        )
+        let outbound = emit(next, next.send_next, next.receive_next, 16, empty_binary())
+        with_output(
+            advance_ip_id(next, next_state),
+            outbound,
+            segment.payload,
+            if has_fin { 3 } else { 2 }
+        )
+    }
+}
+
+fn handle_fin_wait1(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    let fin_acked = has_flag(segment.flags, 16)
+        && segment.acknowledgment == connection.send_next
+    let has_fin = has_flag(segment.flags, 1)
+    let acknowledged = accept_ack(connection, segment.acknowledgment)
+    if has_fin {
+        let next_state = if fin_acked { TcpState::TimeWait } else { TcpState::Closing }
+        let next = make_connection(
+            next_state,
+            acknowledged.local_address,
+            acknowledged.remote_address,
+            acknowledged.local_port,
+            acknowledged.remote_port,
+            acknowledged.send_unacknowledged,
+            acknowledged.send_next,
+            seq_add(segment.sequence, 1),
+            acknowledged.initial_send_sequence,
+            acknowledged.initial_receive_sequence,
+            acknowledged.receive_window,
+            acknowledged.next_ip_identification
+        )
+        let outbound = emit(next, next.send_next, next.receive_next, 16, empty_binary())
+        with_output(advance_ip_id(next, next_state), outbound, empty_binary(), 3)
+    } else if fin_acked {
+        let next = make_connection(
+            TcpState::FinWait2,
+            acknowledged.local_address,
+            acknowledged.remote_address,
+            acknowledged.local_port,
+            acknowledged.remote_port,
+            acknowledged.send_unacknowledged,
+            acknowledged.send_next,
+            acknowledged.receive_next,
+            acknowledged.initial_send_sequence,
+            acknowledged.initial_receive_sequence,
+            acknowledged.receive_window,
+            acknowledged.next_ip_identification
+        )
+        no_output(next, 0)
+    } else {
+        no_output(acknowledged, 0)
+    }
+}
+
+fn handle_fin_wait2(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    let acknowledged = accept_ack(connection, segment.acknowledgment)
+    if has_flag(segment.flags, 1) {
+        let next = make_connection(
+            TcpState::TimeWait,
+            acknowledged.local_address,
+            acknowledged.remote_address,
+            acknowledged.local_port,
+            acknowledged.remote_port,
+            acknowledged.send_unacknowledged,
+            acknowledged.send_next,
+            seq_add(segment.sequence, 1),
+            acknowledged.initial_send_sequence,
+            acknowledged.initial_receive_sequence,
+            acknowledged.receive_window,
+            acknowledged.next_ip_identification
+        )
+        let outbound = emit(next, next.send_next, next.receive_next, 16, empty_binary())
+        with_output(advance_ip_id(next, TcpState::TimeWait), outbound, empty_binary(), 3)
+    } else {
+        no_output(acknowledged, 0)
+    }
+}
+
+fn handle_closing(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    let acknowledged = accept_ack(connection, segment.acknowledgment)
+    if has_flag(segment.flags, 16)
+        && segment.acknowledgment == connection.send_next {
+        let next = make_connection(
+            TcpState::TimeWait,
+            acknowledged.local_address,
+            acknowledged.remote_address,
+            acknowledged.local_port,
+            acknowledged.remote_port,
+            acknowledged.send_unacknowledged,
+            acknowledged.send_next,
+            acknowledged.receive_next,
+            acknowledged.initial_send_sequence,
+            acknowledged.initial_receive_sequence,
+            acknowledged.receive_window,
+            acknowledged.next_ip_identification
+        )
+        no_output(next, 0)
+    } else {
+        no_output(acknowledged, 0)
+    }
+}
+
+fn handle_last_ack(connection: TcpConnection, segment: TcpSegment) -> TcpStep {
+    if has_flag(segment.flags, 16)
+        && segment.acknowledgment == connection.send_next {
+        no_output(reset_connection(connection), 5)
+    } else {
+        no_output(connection, 0)
+    }
+}
+
+fn handle_segment(
+    connection: TcpConnection,
+    ip: Ipv4Packet,
+    segment: TcpSegment
+) -> TcpStep {
+    if has_flag(segment.flags, 4) {
+        no_output(reset_connection(connection), 4)
+    } else {
+        match connection.state {
+            TcpState::Closed => no_output(connection, 0),
+            TcpState::Listen => handle_listen(connection, ip, segment),
+            TcpState::SynSent => handle_syn_sent(connection, segment),
+            TcpState::SynReceived => handle_syn_received(connection, segment),
+            TcpState::Established => receive_payload(connection, segment),
+            TcpState::FinWait1 => handle_fin_wait1(connection, segment),
+            TcpState::FinWait2 => handle_fin_wait2(connection, segment),
+            TcpState::Closing => handle_closing(connection, segment),
+            TcpState::TimeWait => no_output(connection, 0),
+            TcpState::CloseWait => no_output(accept_ack(connection, segment.acknowledgment), 0),
+            TcpState::LastAck => handle_last_ack(connection, segment)
+        }
+    }
+}
+
+fn packet_matches_connection(
+    connection: TcpConnection,
+    ip: Ipv4Packet,
+    segment: TcpSegment
+) -> Bool {
+    let local_match = same_address(ip.destination, connection.local_address)
+        && segment.destination_port == connection.local_port
+    match connection.state {
+        TcpState::Listen => local_match,
+        _ => local_match
+            && same_address(ip.source, connection.remote_address)
+            && segment.source_port == connection.remote_port
+    }
+}
+
+fn input(connection: TcpConnection, packet: String) -> TcpStep {
+    match parse_packet(packet) {
+        PacketParse::Error(_) => no_output(connection, 0),
+        PacketParse::Ok(ip, segment) => if packet_matches_connection(connection, ip, segment) {
+            handle_segment(connection, ip, segment)
+        } else {
+            no_output(connection, 0)
+        }
+    }
+}
+
+fn tcp_send(connection: TcpConnection, payload: String) -> TcpStep {
+    match connection.state {
+        TcpState::Established => if byte_size(payload) == 0 {
+            no_output(connection, 0)
+        } else {
+            let outbound = emit(
+                connection,
+                connection.send_next,
+                connection.receive_next,
+                24,
+                payload
+            )
+            let next = make_connection(
+                TcpState::Established,
+                connection.local_address,
+                connection.remote_address,
+                connection.local_port,
+                connection.remote_port,
+                connection.send_unacknowledged,
+                seq_add(connection.send_next, byte_size(payload)),
+                connection.receive_next,
+                connection.initial_send_sequence,
+                connection.initial_receive_sequence,
+                connection.receive_window,
+                band(connection.next_ip_identification + 1, 65535)
+            )
+            with_output(next, outbound, empty_binary(), 0)
+        },
+        _ => no_output(connection, 0)
+    }
+}
+
+fn close(connection: TcpConnection) -> TcpStep {
+    let can_close = match connection.state {
+        TcpState::Established => true,
+        TcpState::CloseWait => true,
+        _ => false
+    }
+    if can_close {
+        let next_state = match connection.state {
+            TcpState::CloseWait => TcpState::LastAck,
+            _ => TcpState::FinWait1
+        }
+        let outbound = emit(
+            connection,
+            connection.send_next,
+            connection.receive_next,
+            17,
+            empty_binary()
+        )
+        let next = make_connection(
+            next_state,
+            connection.local_address,
+            connection.remote_address,
+            connection.local_port,
+            connection.remote_port,
+            connection.send_unacknowledged,
+            seq_add(connection.send_next, 1),
+            connection.receive_next,
+            connection.initial_send_sequence,
+            connection.initial_receive_sequence,
+            connection.receive_window,
+            band(connection.next_ip_identification + 1, 65535)
+        )
+        with_output(next, outbound, empty_binary(), 0)
+    } else {
+        no_output(connection, 0)
+    }
+}
+
+fn state_is_established(connection: TcpConnection) -> Bool {
+    match connection.state {
+        TcpState::Established => true,
+        _ => false
+    }
+}
+
+fn checksum_vector_is_valid() -> Bool {
+    // RFC-style IPv4 header: checksum field is b861.
+    let without_checksum = list_to_binary([
+        69, 0, 0, 115, 0, 0, 64, 0, 64, 17, 0, 0,
+        192, 168, 0, 1, 192, 168, 0, 199
+    ])
+    let with_checksum = list_to_binary([
+        69, 0, 0, 115, 0, 0, 64, 0, 64, 17, 184, 97,
+        192, 168, 0, 1, 192, 168, 0, 199
+    ])
+    internet_checksum(without_checksum) == 47201
+        && internet_checksum(with_checksum) == 0
+}
+
+fn handshake_and_data_test() -> Bool {
+    let client_address = Ipv4Address { a: 10, b: 0, c: 0, d: 2 }
+    let server_address = Ipv4Address { a: 10, b: 0, c: 0, d: 1 }
+    let server0 = listening(server_address, 8080, 1000)
+    let client_syn = connect(client_address, 49152, server_address, 8080, 5000)
+    let server_syn_ack = input(server0, client_syn.outbound)
+    let client_ack = input(client_syn.connection, server_syn_ack.outbound)
+    let server_established = input(server_syn_ack.connection, client_ack.outbound)
+    let client_data = tcp_send(client_ack.connection, "ping")
+    let server_data = input(server_established.connection, client_data.outbound)
+    let client_after_ack = input(client_data.connection, server_data.outbound)
+    state_is_established(client_after_ack.connection)
+        && state_is_established(server_data.connection)
+        && client_ack.event == 1
+        && server_established.event == 1
+        && server_data.event == 2
+        && server_data.delivered == "ping"
+        && client_after_ack.connection.send_unacknowledged
+            == client_after_ack.connection.send_next
+}
+
+fn codec_rejects_damage() -> Bool {
+    let source = Ipv4Address { a: 192, b: 0, c: 2, d: 1 }
+    let destination = Ipv4Address { a: 198, b: 51, c: 100, d: 2 }
+    let tcp = encode_tcp(source, destination, TcpSegment {
+        source_port: 12345,
+        destination_port: 80,
+        sequence: 9,
+        acknowledgment: 0,
+        flags: 2,
+        window: 4096,
+        urgent_pointer: 0,
+        payload: empty_binary()
+    })
+    let packet = encode_ipv4(Ipv4Packet {
+        source: source,
+        destination: destination,
+        dscp_ecn: 0,
+        identification: 7,
+        ttl: 64,
+        dont_fragment: true,
+        payload: tcp
+    })
+    let bytes = binary_to_list(packet)
+    let damaged = list_to_binary([
+        byte_at(bytes, 0), 1 | tl(tl(bytes))
+    ])
+    let good = match parse_packet(packet) {
+        PacketParse::Ok(_, segment) => segment.source_port == 12345
+            && segment.destination_port == 80
+            && segment.sequence == 9,
+        PacketParse::Error(_) => false
+    }
+    let bad = match parse_packet(damaged) {
+        PacketParse::Error(_) => true,
+        PacketParse::Ok(ignored_ip, ignored_segment) => false
+    }
+    good && bad
+}
+
+fn close_test() -> Bool {
+    let client_address = Ipv4Address { a: 10, b: 1, c: 0, d: 2 }
+    let server_address = Ipv4Address { a: 10, b: 1, c: 0, d: 1 }
+    let server0 = listening(server_address, 443, 700)
+    let client_syn = connect(client_address, 40000, server_address, 443, 300)
+    let server_syn_ack = input(server0, client_syn.outbound)
+    let client_ack = input(client_syn.connection, server_syn_ack.outbound)
+    let server_up = input(server_syn_ack.connection, client_ack.outbound)
+    let client_fin = close(client_ack.connection)
+    let server_close_wait = input(server_up.connection, client_fin.outbound)
+    let client_fin_wait2 = input(client_fin.connection, server_close_wait.outbound)
+    let server_fin = close(server_close_wait.connection)
+    let client_time_wait = input(client_fin_wait2.connection, server_fin.outbound)
+    let server_closed = input(server_fin.connection, client_time_wait.outbound)
+    match (client_time_wait.connection.state, server_closed.connection.state) {
+        (TcpState::TimeWait, TcpState::Closed) => true,
+        _ => false
+    }
+}
+
+fn main() -> Bool {
+    checksum_vector_is_valid()
+        && codec_rejects_damage()
+        && handshake_and_data_test()
+        && close_test()
+}

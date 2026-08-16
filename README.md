@@ -33,6 +33,42 @@ Expected output for `examples/fib.lux`:
 55
 ```
 
+## IPv4/TCP Stack
+
+Lux includes a pure packet-oriented IPv4/TCP implementation in
+[`examples/tcp_ip.lux`](examples/tcp_ip.lux). It validates and emits IPv4 and TCP
+checksums, implements active/passive handshakes, ordered data/ACK handling, reset,
+and orderly close states. Its deterministic protocol vectors run with:
+
+```bash
+cargo test --test tcp_ip_stack
+```
+
+See [`docs/tcp-ip-stack.md`](docs/tcp-ip-stack.md) for the adapter contract,
+supported behavior, and current Yggdrasil packet-buffer boundary.
+
+## Yggdrasil Backend
+
+Lux can compile its content-addressed function modules directly to the
+Yggdrasil register-bytecode format. The sibling Yggdrasil checkout is consumed
+through `../yggdrasil/crates/ygg-bytecode`, and every generated module is run
+through Yggdrasil's verifier before it is written:
+
+```bash
+cargo run -- --yggdrasil examples/fib.lux
+```
+
+The command writes one `.yggm` file per hot-code module plus
+`target/lux/artifacts/fib.ygg.json`. The manifest names every module and records
+the Yggdrasil entry point, for example `HASH:apply/0`; load modules under those
+exact names so `CALL_EXT` can resolve content-addressed Lux calls.
+
+The backend currently covers integers, atoms, tuples, lists, local and external
+calls, arithmetic, comparisons, literal/structural cases, basic receive/send,
+and Yggdrasil debug printing. Constructs that the current Yggdrasil instruction
+set cannot represent—such as floats, binaries/strings, maps, closures, receive
+timeouts, and try/catch—produce an explicit compile-time backend error.
+
 Set `LUX_HOME` to use a different workspace:
 
 ```bash

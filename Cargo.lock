@@ -776,6 +776,9 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "ureq",
+ "ygg-bytecode",
+ "ygg-interp",
+ "ygg-term",
 ]
 
 [[package]]
@@ -1481,6 +1484,22 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "ygg-bytecode"
+version = "0.1.0"
+
+[[package]]
+name = "ygg-interp"
+version = "0.1.0"
+dependencies = [
+ "ygg-bytecode",
+ "ygg-term",
+]
+
+[[package]]
+name = "ygg-term"
+version = "0.1.0"
 
 [[package]]
 name = "yoke"

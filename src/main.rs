@@ -5,6 +5,7 @@ use std::process::{self, Command};
 
 use lux::codegen::cranelift::NativeCompiler;
 use lux::codegen::translate::Translator;
+use lux::codegen::yggdrasil::YggdrasilCompiler;
 use lux::driver::session::{CompileError, SecurityError, Session, SessionConfig};
 use lux::service::api;
 use lux::service::store::SqliteStore;
@@ -46,6 +47,7 @@ fn main() {
         );
         eprintln!("  --port PORT    Port for --serve when no explicit address is given");
         eprintln!("  --native       Compile to native executable via Cranelift");
+        eprintln!("  --yggdrasil    Compile to verified Yggdrasil .yggm modules");
         eprintln!("  --sandbox      Compile with sandbox restrictions");
         process::exit(1);
     }
@@ -53,6 +55,7 @@ fn main() {
     let mut emit_core_only = false;
     let mut parse_only = false;
     let mut native_mode = false;
+    let mut yggdrasil_mode = false;
     let mut sandbox = false;
     let mut publish_namespace = None;
     let mut serve_requested = false;
@@ -69,6 +72,7 @@ fn main() {
             "--emit-core" => emit_core_only = true,
             "--parse-only" => parse_only = true,
             "--native" => native_mode = true,
+            "--yggdrasil" => yggdrasil_mode = true,
             "--sandbox" => sandbox = true,
             "--publish" => publish_namespace = iter.next().cloned(),
             "--port" => {
@@ -181,6 +185,11 @@ fn main() {
         }
     };
 
+    if native_mode && yggdrasil_mode {
+        eprintln!("--native and --yggdrasil select different backends and cannot be combined");
+        process::exit(1);
+    }
+
     if parse_only {
         let tokens = Lexer::new(&source).tokenize();
         for token in &tokens {
@@ -243,6 +252,11 @@ fn main() {
     // Native compilation via Cranelift backend
     if native_mode {
         compile_native(&source, &filename, sandbox, &artifacts_dir);
+        return;
+    }
+
+    if yggdrasil_mode {
+        compile_yggdrasil(&source, &filename, sandbox, &artifacts_dir);
         return;
     }
 
@@ -354,6 +368,88 @@ fn main() {
             }
             process::exit(1);
         }
+    }
+}
+
+fn compile_yggdrasil(source: &str, filename: &str, sandbox: bool, artifacts_dir: &Path) {
+    let config = if sandbox {
+        SessionConfig::sandboxed_default()
+    } else {
+        SessionConfig::trusted()
+    };
+    let mut session = Session::with_config(PathBuf::new(), config);
+    let module = match session.compile_source(source) {
+        Ok(module) => module,
+        Err(error) => {
+            print_compile_error(error);
+            process::exit(1);
+        }
+    };
+
+    let mut translator = Translator::new();
+    let translated = translator.translate_function_modules(&module);
+    if translated.modules.is_empty() {
+        eprintln!("No functions to compile");
+        process::exit(1);
+    }
+
+    let output = match YggdrasilCompiler::compile(
+        &translated.modules,
+        translated.entry_module.as_deref(),
+        translated.entry_arity.unwrap_or(0),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("Yggdrasil compilation error: {error}");
+            process::exit(1);
+        }
+    };
+
+    if let Err(error) = fs::create_dir_all(artifacts_dir) {
+        eprintln!("Error creating {}: {error}", artifacts_dir.display());
+        process::exit(1);
+    }
+
+    let mut manifest_modules = Vec::with_capacity(output.modules.len());
+    for compiled in &output.modules {
+        let file = format!("{}.yggm", compiled.name);
+        let path = artifacts_dir.join(&file);
+        if let Err(error) = fs::write(&path, compiled.encode()) {
+            eprintln!("Error writing {}: {error}", path.display());
+            process::exit(1);
+        }
+        println!("Generated Yggdrasil module: {}", path.display());
+        manifest_modules.push(serde_json::json!({
+            "name": compiled.name,
+            "file": file,
+        }));
+    }
+
+    let entry = output.entry_module.as_ref().map(|module| {
+        serde_json::json!({
+            "module": module,
+            "function": "apply",
+            "arity": output.entry_arity,
+        })
+    });
+    let manifest = serde_json::json!({
+        "format": "YGGM1",
+        "entry": entry,
+        "modules": manifest_modules,
+    });
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("main");
+    let manifest_path = artifacts_dir.join(format!("{stem}.ygg.json"));
+    let manifest_json = serde_json::to_vec_pretty(&manifest).expect("JSON values are serializable");
+    if let Err(error) = fs::write(&manifest_path, manifest_json) {
+        eprintln!("Error writing {}: {error}", manifest_path.display());
+        process::exit(1);
+    }
+    println!("Generated Yggdrasil manifest: {}", manifest_path.display());
+    if let Some(entry) = &output.entry_module {
+        println!("Yggdrasil entry: {entry}:apply/{}", output.entry_arity);
     }
 }
 
