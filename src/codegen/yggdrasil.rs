@@ -293,7 +293,7 @@ impl<'a> FunctionCompiler<'a> {
             variables.insert(parameter.clone(), index as u8);
         }
 
-        let result = self.compile_expr(&self.function.body, &variables)?;
+        let result = self.compile_expr(&self.function.body, &variables, true)?;
         self.code.u8(op::RET).u8(result);
         let nregs = self.next_register as u8;
         let code = std::mem::take(&mut self.code).finish().map_err(|label| {
@@ -315,6 +315,7 @@ impl<'a> FunctionCompiler<'a> {
         &mut self,
         expression: &CoreExpr,
         variables: &HashMap<String, u8>,
+        in_tail: bool,
     ) -> Result<u8, YggdrasilError> {
         match expression {
             CoreExpr::Lit(literal) => self.compile_literal(literal),
@@ -343,7 +344,7 @@ impl<'a> FunctionCompiler<'a> {
             }
             CoreExpr::List(elements, tail) => {
                 let element_registers = self.compile_expressions(elements, variables)?;
-                let mut list = self.compile_expr(tail, variables)?;
+                let mut list = self.compile_expr(tail, variables, false)?;
                 for head in element_registers.into_iter().rev() {
                     let destination = self.allocate_register()?;
                     self.code.u8(op::CONS).u8(destination).u8(head).u8(list);
@@ -352,8 +353,8 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(list)
             }
             CoreExpr::Cons(head, tail) => {
-                let head = self.compile_expr(head, variables)?;
-                let tail = self.compile_expr(tail, variables)?;
+                let head = self.compile_expr(head, variables, false)?;
+                let tail = self.compile_expr(tail, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::CONS).u8(destination).u8(head).u8(tail);
                 Ok(destination)
@@ -361,8 +362,8 @@ impl<'a> FunctionCompiler<'a> {
             CoreExpr::Map(entries) => {
                 let mut registers = Vec::with_capacity(entries.len() * 2);
                 for (key, value) in entries {
-                    registers.push(self.compile_expr(key, variables)?);
-                    registers.push(self.compile_expr(value, variables)?);
+                    registers.push(self.compile_expr(key, variables, false)?);
+                    registers.push(self.compile_expr(value, variables, false)?);
                 }
                 let pair_count = self.argument_count(entries.len())?;
                 let destination = self.allocate_register()?;
@@ -378,41 +379,50 @@ impl<'a> FunctionCompiler<'a> {
             }
             CoreExpr::Apply(callee, arguments) => match callee.as_ref() {
                 CoreExpr::LocalFunRef(name, arity) if *arity == arguments.len() => {
-                    self.compile_direct_call(self.module_name, name, arguments, variables)
+                    self.compile_direct_call(self.module_name, name, arguments, variables, in_tail)
                 }
                 CoreExpr::RemoteFunRef(module, name, arity) if *arity == arguments.len() => {
-                    self.compile_direct_call(module, name, arguments, variables)
+                    self.compile_direct_call(module, name, arguments, variables, in_tail)
                 }
                 _ => self.unsupported("dynamic function application and closures"),
             },
             CoreExpr::Call(module, name, arguments) => {
-                self.compile_direct_call(module, name, arguments, variables)
+                self.compile_direct_call(module, name, arguments, variables, in_tail)
             }
             CoreExpr::Let(bindings, body) => {
                 let mut scope = variables.clone();
                 for (name, value) in bindings {
-                    let register = self.compile_expr(value, &scope)?;
+                    let register = self.compile_expr(value, &scope, false)?;
                     scope.insert(name.clone(), register);
                 }
-                self.compile_expr(body, &scope)
+                self.compile_expr(body, &scope, in_tail)
             }
             CoreExpr::Case(scrutinee, clauses) => {
-                let scrutinee = self.compile_expr(scrutinee, variables)?;
-                self.compile_case(scrutinee, clauses, variables)
+                let scrutinee = self.compile_expr(scrutinee, variables, false)?;
+                self.compile_case(scrutinee, clauses, variables, in_tail)
             }
             CoreExpr::Receive { clauses, timeout } => {
-                if timeout.is_some() {
-                    return self.unsupported("receive timeouts");
+                if let Some((ms, body)) = timeout {
+                    // Clause-less `receive after N => body` is a pure sleep
+                    // (parks on the timer wheel, consumes nothing). Timeouts
+                    // combined with message clauses still need real receive
+                    // timeout support.
+                    if !clauses.is_empty() {
+                        return self.unsupported("receive timeouts with message clauses");
+                    }
+                    let ms = self.compile_expr(ms, variables, false)?;
+                    self.code.u8(op::SLEEP_MS).u8(ms);
+                    return self.compile_expr(body, variables, in_tail);
                 }
                 let message = self.allocate_register()?;
                 self.code.u8(op::RECV).u8(message);
-                self.compile_case(message, clauses, variables)
+                self.compile_case(message, clauses, variables, in_tail)
             }
             CoreExpr::Fun(_, _) => self.unsupported("closures"),
             CoreExpr::Primop(name, arguments) => self.compile_primop(name, arguments, variables),
             CoreExpr::Seq(first, second) => {
-                self.compile_expr(first, variables)?;
-                self.compile_expr(second, variables)
+                self.compile_expr(first, variables, false)?;
+                self.compile_expr(second, variables, in_tail)
             }
             CoreExpr::Try { .. } => self.unsupported("try/catch"),
         }
@@ -425,7 +435,7 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<Vec<u8>, YggdrasilError> {
         expressions
             .iter()
-            .map(|expression| self.compile_expr(expression, variables))
+            .map(|expression| self.compile_expr(expression, variables, false))
             .collect()
     }
 
@@ -501,7 +511,7 @@ impl<'a> FunctionCompiler<'a> {
                 self.emit_binary_const_to(&bytes, destination);
                 destination
             } else {
-                self.compile_expr(&segment.value, variables)?
+                self.compile_expr(&segment.value, variables, false)?
             };
             accumulator = Some(match accumulator {
                 None => part,
@@ -557,7 +567,11 @@ impl<'a> FunctionCompiler<'a> {
         name: &str,
         arguments: &[CoreExpr],
         variables: &HashMap<String, u8>,
+        in_tail: bool,
     ) -> Result<u8, YggdrasilError> {
+        if module == "ygg" {
+            return self.compile_ygg_call(name, arguments, variables);
+        }
         if module == "erlang" {
             return self.compile_erlang_call(name, arguments, variables);
         }
@@ -573,8 +587,30 @@ impl<'a> FunctionCompiler<'a> {
 
         let argument_registers = self.compile_expressions(arguments, variables)?;
         let argument_count = self.argument_count(argument_registers.len())?;
+        if in_tail {
+            // Tail position: hand the target to the engine trampoline —
+            // constant native stack, GC-safe point per hop. This includes
+            // self-recursion: the hashing pass canonicalizes self-references
+            // (`__SELF__`) before addressing, so every function's Core names
+            // itself by its own artifact hash and `module` is that hash here.
+            let module_atom = self.atoms.intern(module);
+            let function_atom = self.atoms.intern(name);
+            self.code
+                .u8(op::TAIL_CALL_EXT)
+                .u32(module_atom)
+                .u32(function_atom)
+                .u8(argument_count);
+            for register in argument_registers {
+                self.code.u8(register);
+            }
+            // Unreachable continuation register (dead code after a terminal).
+            return self.allocate_register();
+        }
         let destination = self.allocate_register()?;
         if module == self.module_name {
+            // Non-tail self-call: the target hash is this module (immutable),
+            // so a direct local CALL is the same call spelled faster — pure
+            // instruction selection, not a naming limitation.
             let Some(function_index) = self.functions.get(&(name.to_owned(), arguments.len()))
             else {
                 return Err(YggdrasilError::UnknownLocalFunction {
@@ -605,6 +641,72 @@ impl<'a> FunctionCompiler<'a> {
         Ok(destination)
     }
 
+    /// Kernel port intrinsics (`extern` module `ygg`): the raw device surface
+    /// a Lux driver programs against. Yggdrasil-only — the BEAM backend has no
+    /// `ygg` module, so these must not be reachable from `main` when the
+    /// example also runs on BEAM.
+    fn compile_ygg_call(
+        &mut self,
+        name: &str,
+        arguments: &[CoreExpr],
+        variables: &HashMap<String, u8>,
+    ) -> Result<u8, YggdrasilError> {
+        match (name, arguments) {
+            // The bytecode op takes the kind as an immediate: literal only.
+            ("port_open", [CoreExpr::Lit(CoreLit::Int(kind))]) => {
+                let destination = self.allocate_register()?;
+                self.code.u8(op::PORT_OPEN).u8(destination).u8(*kind as u8);
+                Ok(destination)
+            }
+            ("port_submit", [_, _, _, _, _]) => {
+                let registers = self.compile_expressions(arguments, variables)?;
+                self.code.u8(op::PORT_SUBMIT2);
+                for register in registers {
+                    self.code.u8(register);
+                }
+                // Submission traps on failure; the expression's value is 0.
+                let destination = self.allocate_register()?;
+                self.code.u8(op::LOAD_INT).u8(destination).i64(0);
+                Ok(destination)
+            }
+            ("buf_to_bin", [id]) => {
+                let source = self.compile_expr(id, variables, false)?;
+                let destination = self.allocate_register()?;
+                self.code.u8(op::BUF_TO_BIN).u8(destination).u8(source);
+                Ok(destination)
+            }
+            ("bin_to_buf", [data]) => {
+                let source = self.compile_expr(data, variables, false)?;
+                let destination = self.allocate_register()?;
+                self.code.u8(op::BIN_TO_BUF).u8(destination).u8(source);
+                Ok(destination)
+            }
+            ("buf_new", [size]) => {
+                let size = self.compile_expr(size, variables, false)?;
+                let destination = self.allocate_register()?;
+                self.code.u8(op::BUF_NEW).u8(destination).u8(size);
+                Ok(destination)
+            }
+            ("buf_read", [buffer, offset, length]) => {
+                let buffer = self.compile_expr(buffer, variables, false)?;
+                let offset = self.compile_expr(offset, variables, false)?;
+                let length = self.compile_expr(length, variables, false)?;
+                let destination = self.allocate_register()?;
+                self.code.u8(op::BUF_READ).u8(destination).u8(buffer).u8(offset).u8(length);
+                Ok(destination)
+            }
+            ("buf_write", [buffer, offset, data]) => {
+                let buffer = self.compile_expr(buffer, variables, false)?;
+                let offset = self.compile_expr(offset, variables, false)?;
+                let data = self.compile_expr(data, variables, false)?;
+                let destination = self.allocate_register()?;
+                self.code.u8(op::BUF_WRITE).u8(destination).u8(buffer).u8(offset).u8(data);
+                Ok(destination)
+            }
+            _ => self.unsupported(&format!("ygg::{name}/{}", arguments.len())),
+        }
+    }
+
     fn compile_lists_call(
         &mut self,
         name: &str,
@@ -613,8 +715,8 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<u8, YggdrasilError> {
         match (name, arguments) {
             ("append", [left, right]) => {
-                let left = self.compile_expr(left, variables)?;
-                let right = self.compile_expr(right, variables)?;
+                let left = self.compile_expr(left, variables, false)?;
+                let right = self.compile_expr(right, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::LIST_CAT).u8(destination).u8(left).u8(right);
                 Ok(destination)
@@ -632,17 +734,17 @@ impl<'a> FunctionCompiler<'a> {
         match (name, arguments) {
             // maps:get(Key, Map)
             ("get", [key, map]) => {
-                let key = self.compile_expr(key, variables)?;
-                let map = self.compile_expr(map, variables)?;
+                let key = self.compile_expr(key, variables, false)?;
+                let map = self.compile_expr(map, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::MAP_GET).u8(destination).u8(map).u8(key);
                 Ok(destination)
             }
             // maps:put(Key, Value, Map)
             ("put", [key, value, map]) => {
-                let key = self.compile_expr(key, variables)?;
-                let value = self.compile_expr(value, variables)?;
-                let map = self.compile_expr(map, variables)?;
+                let key = self.compile_expr(key, variables, false)?;
+                let value = self.compile_expr(value, variables, false)?;
+                let map = self.compile_expr(map, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code
                     .u8(op::MAP_PUT)
@@ -664,8 +766,8 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<u8, YggdrasilError> {
         match (name, arguments) {
             ("band" | "bor" | "bxor" | "bsl" | "bsr", [left, right]) => {
-                let left = self.compile_expr(left, variables)?;
-                let right = self.compile_expr(right, variables)?;
+                let left = self.compile_expr(left, variables, false)?;
+                let right = self.compile_expr(right, variables, false)?;
                 let destination = self.allocate_register()?;
                 let opcode = match name {
                     "band" => op::BAND,
@@ -678,40 +780,40 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(destination)
             }
             ("is_binary", [value]) => {
-                let value = self.compile_expr(value, variables)?;
+                let value = self.compile_expr(value, variables, false)?;
                 let condition = self.allocate_register()?;
                 self.code.u8(op::IS_BINARY).u8(condition).u8(value);
                 self.boolean_from_int(condition, false)
             }
             ("++", [left, right]) => {
-                let left = self.compile_expr(left, variables)?;
-                let right = self.compile_expr(right, variables)?;
+                let left = self.compile_expr(left, variables, false)?;
+                let right = self.compile_expr(right, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::LIST_CAT).u8(destination).u8(left).u8(right);
                 Ok(destination)
             }
             ("bnot", [value]) => {
-                let value = self.compile_expr(value, variables)?;
+                let value = self.compile_expr(value, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::BNOT).u8(destination).u8(value);
                 Ok(destination)
             }
             ("binary_to_list", [binary]) => {
-                let binary = self.compile_expr(binary, variables)?;
+                let binary = self.compile_expr(binary, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::BIN_TO_LIST).u8(destination).u8(binary);
                 Ok(destination)
             }
             ("list_to_binary" | "iolist_to_binary", [list]) => {
-                let list = self.compile_expr(list, variables)?;
+                let list = self.compile_expr(list, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::BIN_FROM_LIST).u8(destination).u8(list);
                 Ok(destination)
             }
             ("binary_part", [binary, offset, length]) => {
-                let binary = self.compile_expr(binary, variables)?;
-                let offset = self.compile_expr(offset, variables)?;
-                let length = self.compile_expr(length, variables)?;
+                let binary = self.compile_expr(binary, variables, false)?;
+                let offset = self.compile_expr(offset, variables, false)?;
+                let length = self.compile_expr(length, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code
                     .u8(op::BIN_PART)
@@ -722,14 +824,14 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(destination)
             }
             ("byte_size", [binary]) => {
-                let binary = self.compile_expr(binary, variables)?;
+                let binary = self.compile_expr(binary, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::BIN_SIZE).u8(destination).u8(binary);
                 Ok(destination)
             }
             ("+", [left, right]) | ("-", [left, right]) | ("*", [left, right]) => {
-                let left = self.compile_expr(left, variables)?;
-                let right = self.compile_expr(right, variables)?;
+                let left = self.compile_expr(left, variables, false)?;
+                let right = self.compile_expr(right, variables, false)?;
                 let destination = self.allocate_register()?;
                 let opcode = match name {
                     "+" => op::ADD,
@@ -741,7 +843,7 @@ impl<'a> FunctionCompiler<'a> {
             }
             ("-", [value]) => {
                 let zero = self.compile_literal(&CoreLit::Int(0))?;
-                let value = self.compile_expr(value, variables)?;
+                let value = self.compile_expr(value, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::SUB).u8(destination).u8(zero).u8(value);
                 Ok(destination)
@@ -750,13 +852,13 @@ impl<'a> FunctionCompiler<'a> {
                 self.compile_comparison(name, left, right, variables)
             }
             ("not", [value]) => {
-                let value = self.compile_expr(value, variables)?;
+                let value = self.compile_expr(value, variables, false)?;
                 let condition = self.compare_with_atom(value, "true")?;
                 self.boolean_from_int(condition, true)
             }
             ("and" | "andalso", [left, right]) => {
-                let left = self.compile_expr(left, variables)?;
-                let right = self.compile_expr(right, variables)?;
+                let left = self.compile_expr(left, variables, false)?;
+                let right = self.compile_expr(right, variables, false)?;
                 let left = self.compare_with_atom(left, "true")?;
                 let right = self.compare_with_atom(right, "true")?;
                 let condition = self.allocate_register()?;
@@ -764,8 +866,8 @@ impl<'a> FunctionCompiler<'a> {
                 self.boolean_from_int(condition, false)
             }
             ("or" | "orelse", [left, right]) => {
-                let left = self.compile_expr(left, variables)?;
-                let right = self.compile_expr(right, variables)?;
+                let left = self.compile_expr(left, variables, false)?;
+                let right = self.compile_expr(right, variables, false)?;
                 let left = self.compare_with_atom(left, "true")?;
                 let right = self.compare_with_atom(right, "true")?;
                 let sum = self.allocate_register()?;
@@ -781,19 +883,19 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(destination)
             }
             ("send", [target, message]) => {
-                let target = self.compile_expr(target, variables)?;
-                let message = self.compile_expr(message, variables)?;
+                let target = self.compile_expr(target, variables, false)?;
+                let message = self.compile_expr(message, variables, false)?;
                 self.code.u8(op::SEND).u8(target).u8(message);
                 Ok(message)
             }
             ("hd", [list]) => {
-                let list = self.compile_expr(list, variables)?;
+                let list = self.compile_expr(list, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::HEAD).u8(destination).u8(list);
                 Ok(destination)
             }
             ("tl", [list]) => {
-                let list = self.compile_expr(list, variables)?;
+                let list = self.compile_expr(list, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::TAIL).u8(destination).u8(list);
                 Ok(destination)
@@ -801,7 +903,7 @@ impl<'a> FunctionCompiler<'a> {
             ("element", [CoreExpr::Lit(CoreLit::Int(index)), tuple])
                 if (1..=u8::MAX as i64 + 1).contains(index) =>
             {
-                let tuple = self.compile_expr(tuple, variables)?;
+                let tuple = self.compile_expr(tuple, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code
                     .u8(op::GET_ELEM)
@@ -811,7 +913,7 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(destination)
             }
             ("exit", [reason]) => {
-                let reason = self.compile_expr(reason, variables)?;
+                let reason = self.compile_expr(reason, variables, false)?;
                 self.code.u8(op::EXIT_ATOM).u8(reason);
                 Ok(reason)
             }
@@ -826,8 +928,8 @@ impl<'a> FunctionCompiler<'a> {
         right: &CoreExpr,
         variables: &HashMap<String, u8>,
     ) -> Result<u8, YggdrasilError> {
-        let left = self.compile_expr(left, variables)?;
-        let right = self.compile_expr(right, variables)?;
+        let left = self.compile_expr(left, variables, false)?;
+        let right = self.compile_expr(right, variables, false)?;
         let condition = self.allocate_register()?;
         let (opcode, first, second, invert) = match operator {
             "==" | "=:=" => (op::CMP_EQ, left, right, false),
@@ -880,12 +982,12 @@ impl<'a> FunctionCompiler<'a> {
                 if matches!(tail.as_ref(), CoreExpr::Lit(CoreLit::Nil)) =>
             {
                 for value in values {
-                    let value = self.compile_expr(value, variables)?;
+                    let value = self.compile_expr(value, variables, false)?;
                     self.code.u8(op::PRINT).u8(value);
                 }
             }
             CoreExpr::Cons(value, tail) if matches!(tail.as_ref(), CoreExpr::Lit(CoreLit::Nil)) => {
-                let value = self.compile_expr(value, variables)?;
+                let value = self.compile_expr(value, variables, false)?;
                 self.code.u8(op::PRINT).u8(value);
             }
             _ => return self.unsupported("io:format argument lists with a non-nil tail"),
@@ -901,8 +1003,8 @@ impl<'a> FunctionCompiler<'a> {
     ) -> Result<u8, YggdrasilError> {
         match (name, arguments) {
             ("send", [target, message]) => {
-                let target = self.compile_expr(target, variables)?;
-                let message = self.compile_expr(message, variables)?;
+                let target = self.compile_expr(target, variables, false)?;
+                let message = self.compile_expr(message, variables, false)?;
                 self.code.u8(op::SEND).u8(target).u8(message);
                 Ok(message)
             }
@@ -920,6 +1022,7 @@ impl<'a> FunctionCompiler<'a> {
         scrutinee: u8,
         clauses: &[CoreClause],
         variables: &HashMap<String, u8>,
+        in_tail: bool,
     ) -> Result<u8, YggdrasilError> {
         let destination = self.allocate_register()?;
         let done = self.allocate_label();
@@ -932,11 +1035,11 @@ impl<'a> FunctionCompiler<'a> {
             let mut scope = variables.clone();
             self.compile_pattern(pattern, scrutinee, next_clause, &mut scope)?;
 
-            let guard = self.compile_expr(&clause.guard, &scope)?;
+            let guard = self.compile_expr(&clause.guard, &scope, false)?;
             let guard_true = self.compare_with_atom(guard, "true")?;
             self.jump_unless(guard_true, next_clause);
 
-            let body = self.compile_expr(&clause.body, &scope)?;
+            let body = self.compile_expr(&clause.body, &scope, in_tail)?;
             if body != destination {
                 self.code.u8(op::MOVE).u8(destination).u8(body);
             }

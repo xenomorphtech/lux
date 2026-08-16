@@ -1,0 +1,42 @@
+// M11: a Lux program driving a kernel device port directly — the serial
+// UART — through the raw `ygg` extern surface (PORT_OPEN / PORT_SUBMIT2).
+// The kernel moves bytes; the protocol (what to write) lives here.
+mod port_hello
+
+extern {
+    fn ygg::port_open(Int) -> Int
+    fn ygg::port_submit(Int, Int, Int, Int, Int) -> Int
+    fn ygg::buf_new(Int) -> Int
+    fn ygg::buf_read(Int, Int, Int) -> String
+    fn ygg::buf_write(Int, Int, String) -> Int
+}
+
+// Write "LUX-PORT-OK\n" over the serial port: op WRITE(1), arg0 = byte,
+// tag -1 = fire-and-forget (no completion).
+fn hello() -> Bool {
+    let port = ygg::port_open(0)
+    write_bytes(port, [76, 85, 88, 45, 80, 79, 82, 84, 45, 79, 75, 10]) && blob_roundtrip()
+}
+
+// Mutable fixed-size kernel blob (the atomics/ETS niche): off-heap,
+// GC-immune, written in place and read back by copy.
+fn blob_roundtrip() -> Bool {
+    let blob = ygg::buf_new(8)
+    let _w = ygg::buf_write(blob, 2, list_to_binary([1, 2, 3]))
+    ygg::buf_read(blob, 0, 8) == list_to_binary([0, 0, 1, 2, 3, 0, 0, 0])
+}
+
+fn write_bytes(port: Int, bytes: [Int]) -> Bool {
+    match bytes {
+        [] => true,
+        [b | rest] => {
+            let _sub = ygg::port_submit(port, 1, b, 0, 0 - 1)
+            write_bytes(port, rest)
+        }
+    }
+}
+
+// BEAM/examples-test entry: ports are kernel-only, so main stays pure.
+fn main() -> Bool {
+    true
+}

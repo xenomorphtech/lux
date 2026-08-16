@@ -59,7 +59,9 @@ fn fib_modules_are_verified_and_run_in_yggdrasil_interpreter() {
         })
         .expect("entry apply/0");
     let mut api = TestApi::new(&modules, &entry_name);
-    let result = run_function(&entry, entry_function, &[], api.as_mut()).expect("execute fib");
+    let result = api
+        .run_trampoline(entry_name.clone(), entry_function, Vec::new())
+        .expect("execute fib");
     assert_eq!(result.as_int(), Some(55));
 }
 
@@ -98,6 +100,11 @@ fn cli_writes_yggm_bundle_and_manifest() {
     }
 }
 
+enum TailTarget {
+    Ext(u32, u32, Vec<Term>),
+    Local(u32, Vec<Term>),
+}
+
 struct TestApi {
     _heap_words: Vec<u64>,
     heap: Heap,
@@ -106,6 +113,7 @@ struct TestApi {
     global_atoms: Vec<String>,
     module_atom_maps: HashMap<String, Vec<u32>>,
     current_module: String,
+    tail_target: Option<TailTarget>,
 }
 
 impl TestApi {
@@ -140,7 +148,59 @@ impl TestApi {
             global_atoms,
             module_atom_maps,
             current_module: entry.to_owned(),
+            tail_target: None,
         })
+    }
+
+    /// Run with tail-call trampolining, the engine contract since TAIL_CALL /
+    /// TAIL_CALL_EXT: a returned sentinel means "re-dispatch to the stash".
+    fn run_trampoline(
+        &mut self,
+        mut module_name: String,
+        mut function: usize,
+        mut args: Vec<Term>,
+    ) -> Result<Term, Trap> {
+        loop {
+            let module = self.modules.get(&module_name).cloned().ok_or(Trap::BadCode)?;
+            let previous = std::mem::replace(&mut self.current_module, module_name.clone());
+            let result = run_function(&module, function, &args, self);
+            self.current_module = previous;
+            let value = result?;
+            if value != ygg_interp::TAIL_SENTINEL {
+                return Ok(value);
+            }
+            match self.tail_target.take().ok_or(Trap::BadCode)? {
+                TailTarget::Ext(module_atom, function_atom, target_args) => {
+                    module_name = self
+                        .global_atoms
+                        .get(module_atom as usize)
+                        .cloned()
+                        .ok_or(Trap::BadCode)?;
+                    let function_name = self
+                        .global_atoms
+                        .get(function_atom as usize)
+                        .cloned()
+                        .ok_or(Trap::BadCode)?;
+                    let target = self.modules.get(&module_name).ok_or(Trap::BadCode)?;
+                    function = target
+                        .functions
+                        .iter()
+                        .position(|f| {
+                            f.arity as usize == target_args.len()
+                                && target
+                                    .atoms
+                                    .get(f.name_atom as usize)
+                                    .is_some_and(|name| name == &function_name)
+                        })
+                        .ok_or(Trap::BadCode)?;
+                    args = target_args;
+                }
+                TailTarget::Local(index, target_args) => {
+                    function = index as usize;
+                    args = target_args;
+                }
+            }
+        }
     }
 }
 
@@ -225,10 +285,16 @@ impl SystemApi for TestApi {
             })
             .ok_or(Trap::BadCode)?;
 
-        let previous = std::mem::replace(&mut self.current_module, module_name);
-        let result = run_function(&module, function, arguments, self);
-        self.current_module = previous;
-        result
+        let _ = module;
+        self.run_trampoline(module_name, function, arguments.to_vec())
+    }
+
+    fn tail_call(&mut self, module_atom: u32, function_atom: u32, args: &[Term]) {
+        self.tail_target = Some(TailTarget::Ext(module_atom, function_atom, args.to_vec()));
+    }
+
+    fn tail_call_local(&mut self, function_index: u32, args: &[Term]) {
+        self.tail_target = Some(TailTarget::Local(function_index, args.to_vec()));
     }
 
     fn buf_to_bin(&mut self, _id: i64) -> Result<Term, Trap> {

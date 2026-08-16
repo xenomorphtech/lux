@@ -1,0 +1,212 @@
+// M11: a virtio-gpu 2D display driver written entirely in Lux, driving the
+// kernel's raw gpu transport port. The kernel moves opaque command buffers
+// and appends physical mem-entries at attach; every protocol byte — headers,
+// resource setup, scanout, transfer, flush — is encoded here.
+mod gpu_demo
+
+extern {
+    fn ygg::port_open(Int) -> Int
+    fn ygg::port_submit(Int, Int, Int, Int, Int) -> Int
+    fn ygg::buf_to_bin(Int) -> String
+    fn ygg::bin_to_buf(String) -> Int
+    fn ygg::buf_write(Int, Int, String) -> Int
+}
+
+// ---- little-endian encoding (as byte lists; one list_to_binary per command) ----
+
+fn le32(value: Int) -> [Int] {
+    [band(value, 255), band(bsr(value, 8), 255), band(bsr(value, 16), 255), band(bsr(value, 24), 255)]
+}
+
+fn zeros(count: Int) -> [Int] {
+    if count == 0 { [] } else { [0] ++ zeros(count - 1) }
+}
+
+// struct virtio_gpu_ctrl_hdr: type, flags, fence_id(64), ctx_id, ring_idx+pad
+fn header(command_type: Int) -> [Int] {
+    le32(command_type) ++ zeros(20)
+}
+
+fn rect(x: Int, y: Int, w: Int, h: Int) -> [Int] {
+    le32(x) ++ le32(y) ++ le32(w) ++ le32(h)
+}
+
+fn le32_at(bytes: [Int], index: Int) -> Int {
+    byte_at(bytes, index)
+        + bsl(byte_at(bytes, index + 1), 8)
+        + bsl(byte_at(bytes, index + 2), 16)
+        + bsl(byte_at(bytes, index + 3), 24)
+}
+
+fn byte_at(bytes: [Int], index: Int) -> Int {
+    if index == 0 { hd(bytes) } else { byte_at(tl(bytes), index - 1) }
+}
+
+// ---- the transport: submit one command, wait for its completion message ----
+
+// op 1 = CTRL: arg0 = command buffer, arg1 = response capacity hint.
+fn ctrl(port: Int, command: String, response_capacity: Int) -> String {
+    let command_buffer = ygg::bin_to_buf(command)
+    let _sub = ygg::port_submit(port, 1, command_buffer, response_capacity, 1)
+    receive {
+        (:port_reply, _port, _tag, result) => ygg::buf_to_bin(result)
+    }
+}
+
+// op 2 = CTRL_ATTACH: arg0 = command prefix, arg1 = backing buffer (pinned;
+// the kernel appends its one {phys, len} mem entry).
+fn ctrl_attach(port: Int, prefix: String, backing_buffer: Int) -> String {
+    let prefix_buffer = ygg::bin_to_buf(prefix)
+    let _sub = ygg::port_submit(port, 2, prefix_buffer, backing_buffer, 2)
+    receive {
+        (:port_reply, _port, _tag, result) => ygg::buf_to_bin(result)
+    }
+}
+
+// VIRTIO_GPU_RESP_OK_NODATA = 0x1100
+fn is_ok(response: String) -> Bool {
+    le32_at(binary_to_list(response), 0) == 4352
+}
+
+// ---- the scene: three color bands + a centered white rectangle ----
+// Format B8G8R8X8 (2): pixel bytes are [b, g, r, 0].
+
+fn pixel_row(b: Int, g: Int, r: Int, width: Int) -> String {
+    repeat_bin(list_to_binary([b, g, r, 0]), width)
+}
+
+// O(log n) doubling: total garbage stays ~2x the final size. This matters
+// because the frame is built in a *nested* call (the trampoline GC only
+// collects at the outermost tail hops), so churn accumulates until return.
+fn repeat_bin(chunk: String, count: Int) -> String {
+    if count == 0 {
+        <<"">>
+    } else {
+        let half = repeat_bin(chunk, bsr(count, 1))
+        let doubled = half ++ half
+        if band(count, 1) == 0 { doubled } else { doubled ++ chunk }
+    }
+}
+
+// Rows by y: red 0..66, green 67..79, green+white rectangle 80..119,
+// green 120..133, blue 134..199.
+fn make_frame() -> String {
+    let red = pixel_row(0, 0, 255, 320)
+    let green = pixel_row(0, 255, 0, 320)
+    let blue = pixel_row(255, 0, 0, 320)
+    let white = pixel_row(255, 255, 255, 80)
+    let green_half = pixel_row(0, 255, 0, 120)
+    let green_rect = green_half ++ white ++ green_half
+    repeat_bin(red, 67)
+        ++ repeat_bin(green, 13)
+        ++ repeat_bin(green_rect, 40)
+        ++ repeat_bin(green, 14)
+        ++ repeat_bin(blue, 66)
+}
+
+// ---- the driver ----
+
+// GET_DISPLAY_INFO (0x100): prove the response round-trip by reading the
+// first scanout's enabled flag (offset 24 + 16 = 40); type OK_DISPLAY_INFO
+// is 0x1101 (4353).
+fn check_display(port: Int) -> Bool {
+    let info = ctrl(port, list_to_binary(header(256)), 408)
+    let info_bytes = binary_to_list(info)
+    le32_at(info_bytes, 0) == 4353 && le32_at(info_bytes, 40) == 1
+}
+
+// RESOURCE_CREATE_2D (0x101): format B8G8R8X8(2), 320x200.
+fn create_resource(port: Int, rid: Int) -> Bool {
+    let create = list_to_binary(header(257) ++ le32(rid) ++ le32(2) ++ le32(320) ++ le32(200))
+    is_ok(ctrl(port, create, 24))
+}
+
+// ATTACH_BACKING (0x106): header + resource + nr_entries=1; the kernel
+// appends the physical mem entry for the pinned framebuffer.
+fn attach_backing(port: Int, rid: Int, backing: Int) -> Bool {
+    let attach_prefix = list_to_binary(header(262) ++ le32(rid) ++ le32(1))
+    is_ok(ctrl_attach(port, attach_prefix, backing))
+}
+
+// SET_SCANOUT (0x103) scanout 0 -> the resource.
+fn set_scanout(port: Int, rid: Int) -> Bool {
+    let scanout = list_to_binary(header(259) ++ rect(0, 0, 320, 200) ++ le32(0) ++ le32(rid))
+    is_ok(ctrl(port, scanout, 24))
+}
+
+// TRANSFER_TO_HOST_2D (0x105): rect + offset(64) + resource + pad.
+fn transfer_frame(port: Int, rid: Int) -> Bool {
+    let transfer = list_to_binary(header(261) ++ rect(0, 0, 320, 200) ++ zeros(8) ++ le32(rid) ++ le32(0))
+    is_ok(ctrl(port, transfer, 24))
+}
+
+// RESOURCE_FLUSH (0x104).
+fn flush_frame(port: Int, rid: Int) -> Bool {
+    let flush = list_to_binary(header(260) ++ rect(0, 0, 320, 200) ++ le32(rid) ++ le32(0))
+    is_ok(ctrl(port, flush, 24))
+}
+
+fn present(port: Int, rid: Int) -> Bool {
+    transfer_frame(port, rid) && flush_frame(port, rid)
+}
+
+fn drive() -> Bool {
+    let port = ygg::port_open(3)
+    let backing = ygg::bin_to_buf(make_frame())
+    check_display(port)
+        && create_resource(port, 1)
+        && attach_backing(port, 1, backing)
+        && set_scanout(port, 1)
+        && present(port, 1)
+}
+
+// ---- animation: a white band bouncing over a solid background ----
+// Per frame: buf_write the changed rows straight into the pinned backing
+// buffer, transfer + flush, then `receive after` paces the frame. The loop is
+// a tail chain, so the trampoline GC collects each frame's command garbage.
+
+fn bg_row() -> String {
+    pixel_row(96, 32, 32, 320)
+}
+
+fn animate(frames: Int) -> Bool {
+    let port = ygg::port_open(3)
+    let backing = ygg::bin_to_buf(repeat_bin(bg_row(), 200))
+    let ok = create_resource(port, 2)
+        && attach_backing(port, 2, backing)
+        && set_scanout(port, 2)
+    let band = repeat_bin(pixel_row(255, 255, 255, 320), 40)
+    let erase = repeat_bin(bg_row(), 40)
+    ok && anim_go(port, backing, band, erase, 0, 2, frames)
+}
+
+fn anim_go(port: Int, backing: Int, band: String, erase: String, y: Int, dy: Int, n: Int) -> Bool {
+    if n == 0 {
+        true
+    } else {
+        let _draw = ygg::buf_write(backing, y * 1280, band)
+        let _shown = present(port, 2)
+        receive {
+            after 16 => anim_step(port, backing, band, erase, y, dy, n)
+        }
+    }
+}
+
+fn anim_step(port: Int, backing: Int, band: String, erase: String, y: Int, dy: Int, n: Int) -> Bool {
+    if n == 1 {
+        true
+    } else {
+        let _wipe = ygg::buf_write(backing, y * 1280, erase)
+        let next = y + dy
+        if next > 160 || next < 0 {
+            anim_go(port, backing, band, erase, y - dy, 0 - dy, n - 1)
+        } else {
+            anim_go(port, backing, band, erase, next, dy, n - 1)
+        }
+    }
+}
+
+// BEAM/examples-test entry: the gpu port is kernel-only, so main stays pure.
+fn main() -> Bool {
+    true
+}

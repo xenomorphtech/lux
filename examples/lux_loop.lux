@@ -1,0 +1,23 @@
+mod lux_loop
+// M11 acceptance: a tail-recursive loop that allocates garbage every
+// iteration. On Yggdrasil this must run in constant native stack (trampolined
+// TAIL_CALL_EXT) and bounded heap (trampoline-point compaction) — 100k
+// iterations against a 256 KiB quota that would die in ~700 iterations
+// without GC.
+
+fn main() -> Int {
+    loop_test(100000)
+}
+
+fn loop_test(n: Int) -> Int {
+    loop_go(n, 0)
+}
+
+fn loop_go(n: Int, acc: Int) -> Int {
+    if n == 0 {
+        acc
+    } else {
+        let garbage = [n, n + 1, n + 2]
+        loop_go(n - 1, acc + hd(garbage))
+    }
+}

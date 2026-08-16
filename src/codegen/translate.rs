@@ -1789,6 +1789,30 @@ impl Translator {
                     );
                 }
 
+                // && and || are short-circuit control flow (BEAM's
+                // andalso/orelse), never strict calls: the right operand must
+                // not run when the left decides, and it must stay in TAIL
+                // position — a loop guarded by a condition chain has to keep
+                // trampolining (and GC-ing) on Yggdrasil instead of running
+                // nested as a call argument.
+                if matches!(op, ast::BinOp::And | ast::BinOp::Or) {
+                    let lit = |name: &str| CoreExpr::Lit(CoreLit::Atom(name.into()));
+                    let (on_true, on_false) = if matches!(op, ast::BinOp::And) {
+                        (r, lit("false"))
+                    } else {
+                        (lit("true"), r)
+                    };
+                    let clause = |pat: &str, body: CoreExpr| CoreClause {
+                        patterns: vec![CorePattern::Lit(CoreLit::Atom(pat.into()))],
+                        guard: CoreExpr::Lit(CoreLit::Atom("true".into())),
+                        body,
+                    };
+                    return CoreExpr::Case(
+                        Box::new(l),
+                        vec![clause("true", on_true), clause("false", on_false)],
+                    );
+                }
+
                 let (module, func) = match op {
                     ast::BinOp::Add => ("erlang", "+"),
                     ast::BinOp::Sub => ("erlang", "-"),
@@ -1801,9 +1825,7 @@ impl Translator {
                     ast::BinOp::LtEq => ("erlang", "=<"),
                     ast::BinOp::Gt => ("erlang", ">"),
                     ast::BinOp::GtEq => ("erlang", ">="),
-                    ast::BinOp::And => ("erlang", "and"),
-                    ast::BinOp::Or => ("erlang", "or"),
-                    ast::BinOp::Concat => unreachable!(),
+                    ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Concat => unreachable!(),
                     ast::BinOp::Pipe => {
                         // x |> f becomes f(x)
                         // If right side is a function name, use LocalFunRef or Call

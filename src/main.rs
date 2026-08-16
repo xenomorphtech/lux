@@ -432,10 +432,22 @@ fn compile_yggdrasil(source: &str, filename: &str, sandbox: bool, artifacts_dir:
             "arity": output.entry_arity,
         })
     });
+    let aliases: Vec<serde_json::Value> = translated
+        .metadata
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.source_name,
+                "module": f.module_name,
+                "arity": f.arity,
+            })
+        })
+        .collect();
     let manifest = serde_json::json!({
         "format": "YGGM1",
         "entry": entry,
         "modules": manifest_modules,
+        "aliases": aliases,
     });
     let stem = Path::new(filename)
         .file_stem()
