@@ -1,0 +1,9 @@
+// Device-facing virgl probe. main() stays pure so the examples suite can run
+// it on BEAM; virgl_probe() talks to the gpu port on Yggdrasil.
+mod virgl_demo
+
+use virgl
+
+fn main() -> Bool {
+    virgl_self_test()
+}

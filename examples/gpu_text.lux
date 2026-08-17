@@ -1,0 +1,8 @@
+// Host-side smoke test for the reusable GPU text compositor.
+mod gpu_text_example
+
+use gpu_text
+
+fn main() -> Bool {
+    gpu_text_self_test()
+}

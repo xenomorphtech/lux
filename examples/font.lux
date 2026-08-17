@@ -1,0 +1,8 @@
+// Host-side smoke test for the reusable grayscale font library.
+mod font_example
+
+use font
+
+fn main() -> Bool {
+    font_self_test()
+}

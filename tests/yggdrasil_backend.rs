@@ -305,3 +305,50 @@ impl SystemApi for TestApi {
         Err(Trap::Badarg)
     }
 }
+
+#[test]
+fn thirty_two_bit_binary_literals_are_little_endian_constants() {
+    let source = r#"
+mod packed
+fn main() -> Bool {
+    <<0x44434241:32>> == "ABCD"
+}
+"#;
+    let mut session = Session::with_config(PathBuf::new(), SessionConfig::trusted());
+    let syntax = session.compile_source(source).expect("type-check packed binary");
+    let translated = Translator::new().translate_function_modules(&syntax);
+    let output = YggdrasilCompiler::compile(
+        &translated.modules,
+        translated.entry_module.as_deref(),
+        translated.entry_arity.unwrap_or(0),
+    )
+    .expect("compile packed binary to Yggdrasil");
+    let entry_name = output.entry_module.expect("main has an entry module");
+    for compiled in &output.modules {
+        ygg_bytecode::verify::verify(&compiled.module).expect("packed module must verify");
+    }
+    let mut api = TestApi::new(&output.modules, &entry_name);
+    let entry = output
+        .modules
+        .iter()
+        .find(|module| module.name == entry_name)
+        .expect("entry module is in output")
+        .module
+        .clone();
+    let entry_function = entry
+        .functions
+        .iter()
+        .position(|function| {
+            function.arity == 0
+                && entry
+                    .atoms
+                    .get(function.name_atom as usize)
+                    .is_some_and(|name| name == "apply")
+        })
+        .expect("entry apply/0");
+    let result = api
+        .run_trampoline(entry_name, entry_function, Vec::new())
+        .expect("execute packed binary");
+    let atom = result.as_atom().expect("boolean atom");
+    assert_eq!(api.global_atoms[atom as usize], "true");
+}

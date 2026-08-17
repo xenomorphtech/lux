@@ -1,0 +1,1053 @@
+// A small ANSI/VT100 terminal for Yggdrasil.  Everything above the raw
+// serial and virtio-gpu transport lives here: terminal state, CSI parsing,
+// the reusable grayscale font library, the cell store, scrolling, and scanout.
+mod ansi_terminal
+
+use gpu_text
+
+extern {
+    fn ygg::port_open(Int) -> Int
+    fn ygg::port_submit(Int, Int, Int, Int, Int) -> Int
+    fn ygg::buf_new(Int) -> Int
+    fn ygg::buf_read(Int, Int, Int) -> String
+    fn ygg::buf_write(Int, Int, String) -> Int
+    fn ygg::bin_to_buf(String) -> Int
+    fn ygg::ticks() -> Int
+}
+
+struct Screen {
+    gpu: Int,
+    serial: Int,
+    vbo: Int,
+    color: Int,
+    chars: Int,
+    foregrounds: Int,
+    backgrounds: Int,
+    dirty: Int,
+    mode: Int
+}
+
+struct Terminal {
+    screen: Screen,
+    column: Int,
+    row: Int,
+    saved_column: Int,
+    saved_row: Int,
+    foreground: Int,
+    background: Int,
+    bold: Bool,
+    reverse: Bool,
+    parser: Int,
+    current_parameter: Int,
+    has_parameter: Bool,
+    parameters: [Int]
+}
+
+// ---- immutable terminal-state updates -----------------------------------
+
+fn with_cursor(terminal: Terminal, column: Int, row: Int) -> Terminal {
+    Terminal {
+        screen: terminal.screen,
+        column: column,
+        row: row,
+        saved_column: terminal.saved_column,
+        saved_row: terminal.saved_row,
+        foreground: terminal.foreground,
+        background: terminal.background,
+        bold: terminal.bold,
+        reverse: terminal.reverse,
+        parser: terminal.parser,
+        current_parameter: terminal.current_parameter,
+        has_parameter: terminal.has_parameter,
+        parameters: terminal.parameters
+    }
+}
+
+fn with_saved_cursor(terminal: Terminal, column: Int, row: Int) -> Terminal {
+    Terminal {
+        screen: terminal.screen,
+        column: terminal.column,
+        row: terminal.row,
+        saved_column: column,
+        saved_row: row,
+        foreground: terminal.foreground,
+        background: terminal.background,
+        bold: terminal.bold,
+        reverse: terminal.reverse,
+        parser: terminal.parser,
+        current_parameter: terminal.current_parameter,
+        has_parameter: terminal.has_parameter,
+        parameters: terminal.parameters
+    }
+}
+
+fn with_attributes(terminal: Terminal, foreground: Int, background: Int, bold: Bool, reverse: Bool) -> Terminal {
+    Terminal {
+        screen: terminal.screen,
+        column: terminal.column,
+        row: terminal.row,
+        saved_column: terminal.saved_column,
+        saved_row: terminal.saved_row,
+        foreground: foreground,
+        background: background,
+        bold: bold,
+        reverse: reverse,
+        parser: terminal.parser,
+        current_parameter: terminal.current_parameter,
+        has_parameter: terminal.has_parameter,
+        parameters: terminal.parameters
+    }
+}
+
+fn with_parser(terminal: Terminal, parser: Int, current: Int, has_current: Bool, parameters: [Int]) -> Terminal {
+    Terminal {
+        screen: terminal.screen,
+        column: terminal.column,
+        row: terminal.row,
+        saved_column: terminal.saved_column,
+        saved_row: terminal.saved_row,
+        foreground: terminal.foreground,
+        background: terminal.background,
+        bold: terminal.bold,
+        reverse: terminal.reverse,
+        parser: parser,
+        current_parameter: current,
+        has_parameter: has_current,
+        parameters: parameters
+    }
+}
+
+fn reset_parser(terminal: Terminal) -> Terminal {
+    with_parser(terminal, 0, 0, false, [])
+}
+
+fn term_cols() -> Int { 40 }
+fn term_rows() -> Int { 25 }
+fn term_last_col() -> Int { term_cols() - 1 }
+fn term_last_row() -> Int { term_rows() - 1 }
+fn term_cells() -> Int { term_cols() * term_rows() }
+fn term_width() -> Int { term_cols() * font_cell_width() }
+fn term_height() -> Int { term_rows() * font_cell_height() }
+fn term_pixels() -> Int { term_width() * term_height() }
+fn term_cell_row_bytes() -> Int { term_width() * font_cell_height() * 4 }
+
+// ---- virtio-gpu transport (shared gpu library) ---------------------------
+
+fn term_check_display(port: Int) -> Bool {
+    gpu_scanout_enabled(gpu_get_display_info(port))
+}
+
+fn term_setup_step(serial: Int, label: [Int], ok: Bool) -> Bool {
+    if ok {
+        let _note = term_say(serial, label)
+        true
+    } else {
+        false
+    }
+}
+
+fn term_setup_2d(port: Int, serial: Int, color: Int) -> Bool {
+    term_setup_step(serial, binary_to_list("[terminal] 2d resource\n"), gpu_create_2d(port, 7, gpu_format_b8g8r8x8(), term_width(), term_height()))
+        && term_setup_step(serial, binary_to_list("[terminal] 2d backing\n"), gpu_attach_backing(port, 7, color))
+        && term_setup_step(serial, binary_to_list("[terminal] 2d scanout\n"), gpu_set_scanout(port, 0, 7, term_width(), term_height()))
+}
+
+fn term_setup_gpu(port: Int, serial: Int, vbo: Int, color: Int) -> Int {
+    let atlas = ygg::bin_to_buf(font_atlas_2d())
+    if gpu_text_open_ctx(port)
+        && term_setup_step(serial, binary_to_list("[terminal] ctx\n"), true)
+        && term_setup_step(serial, binary_to_list("[terminal] colorbuf\n"), gpu_text_create_color(port, term_width(), term_height(), color))
+        && term_setup_step(serial, binary_to_list("[terminal] display\n"), gpu_text_scanout(port, term_width(), term_height(), color))
+        && term_setup_step(serial, binary_to_list("[terminal] atlas\n"), gpu_text_create_atlas(port, atlas))
+        && term_setup_step(serial, binary_to_list("[terminal] vbo\n"), gpu_text_create_vbo(port, vbo))
+        && term_setup_step(serial, binary_to_list("[terminal] pipeline\n"), gpu_text_pipeline(port, term_width(), term_height()))
+        && term_setup_step(serial, binary_to_list("[terminal] scanout\n"), gpu_text_show(port, 0, 0, term_width(), term_height(), term_width()))
+    {
+        1
+    } else if term_setup_2d(port, serial, color) {
+        0
+    } else {
+        0 - 1
+    }
+}
+
+fn term_i_min(a: Int, b: Int) -> Int {
+    if a < b { a } else { b }
+}
+
+fn term_i_max(a: Int, b: Int) -> Int {
+    if a > b { a } else { b }
+}
+
+fn term_dirty_get(screen: Screen, offset: Int) -> Int {
+    gpu_le32_bin(ygg::buf_read(screen.dirty, offset, 4), 0)
+}
+
+fn term_dirty_put(screen: Screen, offset: Int, value: Int) -> Bool {
+    let _written = ygg::buf_write(screen.dirty, offset, list_to_binary(gpu_le32(value)))
+    true
+}
+
+fn term_mark_dirty(screen: Screen, x: Int, y: Int, width: Int, height: Int) -> Bool {
+    let old_w = term_dirty_get(screen, 8)
+    if old_w == 0 {
+        let _x = term_dirty_put(screen, 0, x)
+        let _y = term_dirty_put(screen, 4, y)
+        let _w = term_dirty_put(screen, 8, width)
+        term_dirty_put(screen, 12, height)
+    } else {
+        let x0 = term_i_min(term_dirty_get(screen, 0), x)
+        let y0 = term_i_min(term_dirty_get(screen, 4), y)
+        let x1 = term_i_max(term_dirty_get(screen, 0) + old_w, x + width)
+        let y1 = term_i_max(term_dirty_get(screen, 4) + term_dirty_get(screen, 12), y + height)
+        let _x = term_dirty_put(screen, 0, x0)
+        let _y = term_dirty_put(screen, 4, y0)
+        let _w = term_dirty_put(screen, 8, x1 - x0)
+        term_dirty_put(screen, 12, y1 - y0)
+    }
+}
+
+fn term_mark_cell(screen: Screen, column: Int, row: Int) -> Bool {
+    term_mark_dirty(screen, column, row, 1, 1)
+}
+
+fn term_mark_full(screen: Screen) -> Bool {
+    term_mark_dirty(screen, 0, 0, term_cols(), term_rows())
+}
+
+fn term_cell_colors(terminal: Terminal, column: Int, row: Int) -> [Int] {
+    let index = row * term_cols() + column
+    let character = one_byte(terminal.screen.chars, index)
+    let foreground = one_byte(terminal.screen.foregrounds, index)
+    let background = one_byte(terminal.screen.backgrounds, index)
+    if column == terminal.column && row == terminal.row {
+        [character, background, foreground]
+    } else {
+        [character, foreground, background]
+    }
+}
+
+fn term_emit_cell(terminal: Terminal, column: Int, row: Int, offset: Int) -> Int {
+    match term_cell_colors(terminal, column, row) {
+        [character, foreground, background | _rest] => gpu_text_emit_cell(
+            terminal.screen.vbo,
+            offset,
+            column,
+            row,
+            character,
+            foreground,
+            background
+        ),
+        _ => offset
+    }
+}
+
+fn term_emit_row(terminal: Terminal, column: Int, last_column: Int, row: Int, offset: Int) -> Int {
+    if column > last_column {
+        offset
+    } else {
+        term_emit_row(terminal, column + 1, last_column, row, term_emit_cell(terminal, column, row, offset))
+    }
+}
+
+fn term_emit_rows(terminal: Terminal, start_column: Int, last_column: Int, row: Int, last_row: Int, offset: Int) -> Int {
+    if row > last_row {
+        offset
+    } else {
+        term_emit_rows(
+            terminal,
+            start_column,
+            last_column,
+            row + 1,
+            last_row,
+            term_emit_row(terminal, start_column, last_column, row, offset)
+        )
+    }
+}
+
+fn term_fill_cell(terminal: Terminal, column: Int, row: Int) -> Bool {
+    match term_cell_colors(terminal, column, row) {
+        [character, foreground, background | _rest] => font_blit(
+            terminal.screen.color,
+            term_width(),
+            column * font_cell_width(),
+            row * font_cell_height(),
+            character,
+            color_pixel(foreground),
+            color_pixel(background)
+        ),
+        _ => true
+    }
+}
+
+fn term_fill_line(terminal: Terminal, column: Int, last_column: Int, row: Int) -> Bool {
+    if column > last_column {
+        true
+    } else {
+        let _filled = term_fill_cell(terminal, column, row)
+        term_fill_line(terminal, column + 1, last_column, row)
+    }
+}
+
+fn term_fill_rows(terminal: Terminal, start_column: Int, last_column: Int, row: Int, last_row: Int) -> Bool {
+    if row > last_row {
+        true
+    } else {
+        let _filled = term_fill_line(terminal, start_column, last_column, row)
+        term_fill_rows(terminal, start_column, last_column, row + 1, last_row)
+    }
+}
+
+fn term_present(terminal: Terminal) -> Bool {
+    let width = term_dirty_get(terminal.screen, 8)
+    if width == 0 {
+        true
+    } else {
+        let x = term_dirty_get(terminal.screen, 0)
+        let y = term_dirty_get(terminal.screen, 4)
+        let height = term_dirty_get(terminal.screen, 12)
+        let _cleared = term_dirty_put(terminal.screen, 8, 0)
+        let px = x * font_cell_width()
+        let py = y * font_cell_height()
+        let pw = width * font_cell_width()
+        let ph = height * font_cell_height()
+        if terminal.screen.mode == 1 {
+            let bytes = term_emit_rows(terminal, x, x + width - 1, y, y + height - 1, 0)
+            let vertices = bsr(bytes, 5)
+            gpu_text_upload_cells(terminal.screen.gpu, terminal.screen.vbo, bytes)
+                && gpu_text_draw(terminal.screen.gpu, vertices)
+                && gpu_text_show(terminal.screen.gpu, px, py, pw, ph, term_width())
+        } else {
+            let _filled = term_fill_rows(terminal, x, x + width - 1, y, y + height - 1)
+            gpu_present_rect(terminal.screen.gpu, 7, px, py, pw, ph, term_width())
+        }
+    }
+}
+
+fn term_fps_cols() -> Int { 7 }
+fn term_fps_col() -> Int { term_cols() - term_fps_cols() }
+
+fn term_mod10(n: Int) -> Int {
+    if n < 10 { n } else { term_mod10(n - 10) }
+}
+
+fn term_div10(n: Int) -> Int {
+    if n < 10 { 0 } else { 1 + term_div10(n - 10) }
+}
+
+fn term_digit_or_space(value: Int, hide: Bool) -> Int {
+    if hide { 32 } else { 48 + value }
+}
+
+fn term_clamp_fps(fps: Int) -> Int {
+    if fps > 999 {
+        999
+    } else if fps < 0 {
+        0
+    } else {
+        fps
+    }
+}
+
+fn term_fps_pack(hundreds: Int, tens: Int, ones: Int) -> [Int] {
+    [
+        term_digit_or_space(hundreds, hundreds == 0),
+        term_digit_or_space(tens, if hundreds == 0 { tens == 0 } else { false }),
+        48 + ones,
+        32, 102, 112, 115
+    ]
+}
+
+fn term_fps_chars(fps: Int) -> [Int] {
+    let n = term_clamp_fps(fps)
+    term_fps_pack(term_div10(term_div10(n)), term_mod10(term_div10(n)), term_mod10(n))
+}
+
+fn term_show_fps(terminal: Terminal, fps: Int) -> Bool {
+    let _drawn = font_blit_text(
+        terminal.screen.color,
+        term_width(),
+        term_fps_col() * font_cell_width(),
+        0,
+        term_fps_chars(fps),
+        color_pixel(11),
+        color_pixel(0)
+    )
+    if terminal.screen.mode == 1 {
+        true
+    } else {
+        gpu_present_rect(
+            terminal.screen.gpu,
+            7,
+            term_fps_col() * font_cell_width(),
+            0,
+            term_fps_cols() * font_cell_width(),
+            font_cell_height(),
+            term_width()
+        )
+    }
+}
+
+fn term_present_frame(terminal: Terminal, fps: Int) -> Bool {
+    let _cells = term_present(terminal)
+    term_show_fps(terminal, fps)
+}
+
+fn term_roll_fps(now: Int, frames: Int, last_ms: Int, fps: Int) -> [Int] {
+    if now - last_ms >= 1000 {
+        [1, now, frames]
+    } else {
+        [frames + 1, last_ms, fps]
+    }
+}
+
+// ---- colors and grayscale font blit -------------------------------------
+
+// VGA's sixteen colors, emitted in virtio-gpu B8G8R8X8 byte order.
+fn color_pixel(color: Int) -> String {
+    match color {
+        0 => list_to_binary([0, 0, 0, 0]),
+        1 => list_to_binary([0, 0, 170, 0]),
+        2 => list_to_binary([0, 170, 0, 0]),
+        3 => list_to_binary([0, 170, 170, 0]),
+        4 => list_to_binary([170, 0, 0, 0]),
+        5 => list_to_binary([170, 0, 170, 0]),
+        6 => list_to_binary([170, 170, 0, 0]),
+        7 => list_to_binary([170, 170, 170, 0]),
+        8 => list_to_binary([85, 85, 85, 0]),
+        9 => list_to_binary([85, 85, 255, 0]),
+        10 => list_to_binary([85, 255, 85, 0]),
+        11 => list_to_binary([85, 255, 255, 0]),
+        12 => list_to_binary([255, 85, 85, 0]),
+        13 => list_to_binary([255, 85, 255, 0]),
+        14 => list_to_binary([255, 255, 85, 0]),
+        _ => list_to_binary([255, 255, 255, 0])
+    }
+}
+
+fn effective_foreground(terminal: Terminal) -> Int {
+    if terminal.bold && terminal.foreground < 8 {
+        terminal.foreground + 8
+    } else {
+        terminal.foreground
+    }
+}
+
+fn display_foreground(terminal: Terminal) -> Int {
+    if terminal.reverse { terminal.background } else { effective_foreground(terminal) }
+}
+
+fn display_background(terminal: Terminal) -> Int {
+    if terminal.reverse { effective_foreground(terminal) } else { terminal.background }
+}
+
+fn draw_cell_colors(terminal: Terminal, column: Int, row: Int, character: Int, foreground: Int, background: Int) -> Bool {
+    term_mark_cell(terminal.screen, column, row)
+}
+
+fn draw_cell(terminal: Terminal, column: Int, row: Int, character: Int, foreground: Int, background: Int) -> Bool {
+    let bright_foreground = if terminal.bold && foreground < 8 { foreground + 8 } else { foreground }
+    if terminal.reverse {
+        draw_cell_colors(terminal, column, row, character, background, bright_foreground)
+    } else {
+        draw_cell_colors(terminal, column, row, character, bright_foreground, background)
+    }
+}
+
+fn one_byte(buffer: Int, index: Int) -> Int {
+    hd(binary_to_list(ygg::buf_read(buffer, index, 1)))
+}
+
+fn stored_cell(terminal: Terminal, column: Int, row: Int) -> Bool {
+    let index = row * term_cols() + column
+    let character = one_byte(terminal.screen.chars, index)
+    let foreground = one_byte(terminal.screen.foregrounds, index)
+    let background = one_byte(terminal.screen.backgrounds, index)
+    draw_cell_colors(terminal, column, row, character, foreground, background)
+}
+
+fn hide_cursor(terminal: Terminal) -> Terminal {
+    let _dirty = term_mark_cell(terminal.screen, terminal.column, terminal.row)
+    terminal
+}
+
+fn show_cursor(terminal: Terminal) -> Terminal {
+    let _dirty = term_mark_cell(terminal.screen, terminal.column, terminal.row)
+    terminal
+}
+
+fn repeat_binary(chunk: String, count: Int) -> String {
+    if count == 0 {
+        <<"">>
+    } else {
+        let half = repeat_binary(chunk, bsr(count, 1))
+        let doubled = half ++ half
+        if band(count, 1) == 0 { doubled } else { doubled ++ chunk }
+    }
+}
+
+// ---- cell store, wrapping, scrolling, and erasure ------------------------
+
+fn store_cell(terminal: Terminal, column: Int, row: Int, character: Int) -> Bool {
+    let index = row * term_cols() + column
+    let foreground = display_foreground(terminal)
+    let background = display_background(terminal)
+    let _character = ygg::buf_write(terminal.screen.chars, index, list_to_binary([character]))
+    let _foreground = ygg::buf_write(terminal.screen.foregrounds, index, list_to_binary([foreground]))
+    let _background = ygg::buf_write(terminal.screen.backgrounds, index, list_to_binary([background]))
+    draw_cell_colors(terminal, column, row, character, foreground, background)
+}
+
+fn scroll(terminal: Terminal) -> Terminal {
+    let foreground = display_foreground(terminal)
+    let background = display_background(terminal)
+    let kept = term_cells() - term_cols()
+    let characters = ygg::buf_read(terminal.screen.chars, term_cols(), kept)
+    let foregrounds = ygg::buf_read(terminal.screen.foregrounds, term_cols(), kept)
+    let backgrounds = ygg::buf_read(terminal.screen.backgrounds, term_cols(), kept)
+    let _characters_up = ygg::buf_write(terminal.screen.chars, 0, characters)
+    let _foregrounds_up = ygg::buf_write(terminal.screen.foregrounds, 0, foregrounds)
+    let _backgrounds_up = ygg::buf_write(terminal.screen.backgrounds, 0, backgrounds)
+    let _new_characters = ygg::buf_write(terminal.screen.chars, kept, repeat_binary(list_to_binary([32]), term_cols()))
+    let _new_foregrounds = ygg::buf_write(terminal.screen.foregrounds, kept, repeat_binary(list_to_binary([foreground]), term_cols()))
+    let _new_backgrounds = ygg::buf_write(terminal.screen.backgrounds, kept, repeat_binary(list_to_binary([background]), term_cols()))
+    let _dirty = term_mark_full(terminal.screen)
+    with_cursor(terminal, terminal.column, term_last_row())
+}
+
+fn line_feed(terminal: Terminal) -> Terminal {
+    if terminal.row == term_last_row() {
+        scroll(terminal)
+    } else {
+        with_cursor(terminal, terminal.column, terminal.row + 1)
+    }
+}
+
+fn put_character(terminal: Terminal, character: Int) -> Terminal {
+    let _stored = store_cell(terminal, terminal.column, terminal.row, character)
+    if terminal.column == term_last_col() {
+        line_feed(with_cursor(terminal, 0, terminal.row))
+    } else {
+        with_cursor(terminal, terminal.column + 1, terminal.row)
+    }
+}
+
+fn put_spaces(terminal: Terminal, count: Int) -> Terminal {
+    if count == 0 { terminal } else { put_spaces(put_character(terminal, 32), count - 1) }
+}
+
+fn backspace(terminal: Terminal) -> Terminal {
+    let moved = if terminal.column > 0 {
+        with_cursor(terminal, terminal.column - 1, terminal.row)
+    } else if terminal.row > 0 {
+        with_cursor(terminal, term_last_col(), terminal.row - 1)
+    } else {
+        terminal
+    }
+    let _blank = store_cell(moved, moved.column, moved.row, 32)
+    moved
+}
+
+fn clear_cell(terminal: Terminal, index: Int) -> Bool {
+    let row = clear_row_for_index(index)
+    let column = index - row * term_cols()
+    store_cell(terminal, column, row, 32)
+}
+
+// Division is intentionally absent from the Yggdrasil ISA.  This bounded
+// subtraction computes index / 40 for erase operations.
+fn clear_row_for_index(index: Int) -> Int {
+    clear_row_go(index, 0)
+}
+
+fn clear_row_go(index: Int, row: Int) -> Int {
+    if index < term_cols() { row } else { clear_row_go(index - term_cols(), row + 1) }
+}
+
+fn clear_range(terminal: Terminal, index: Int, last: Int) -> Terminal {
+    if index > last {
+        terminal
+    } else {
+        let _cleared = clear_cell(terminal, index)
+        clear_range(terminal, index + 1, last)
+    }
+}
+
+fn erase_display(terminal: Terminal, mode: Int) -> Terminal {
+    let index = terminal.row * term_cols() + terminal.column
+    if mode == 2 || mode == 3 {
+        let foreground = display_foreground(terminal)
+        let background = display_background(terminal)
+        let _characters = ygg::buf_write(terminal.screen.chars, 0, repeat_binary(list_to_binary([32]), term_cells()))
+        let _foregrounds = ygg::buf_write(terminal.screen.foregrounds, 0, repeat_binary(list_to_binary([foreground]), term_cells()))
+        let _backgrounds = ygg::buf_write(terminal.screen.backgrounds, 0, repeat_binary(list_to_binary([background]), term_cells()))
+        let _dirty = term_mark_full(terminal.screen)
+        terminal
+    } else if mode == 1 {
+        clear_range(terminal, 0, index)
+    } else {
+        clear_range(terminal, index, term_cells() - 1)
+    }
+}
+
+fn erase_line(terminal: Terminal, mode: Int) -> Terminal {
+    let line_start = terminal.row * term_cols()
+    let index = line_start + terminal.column
+    if mode == 2 {
+        clear_range(terminal, line_start, line_start + term_last_col())
+    } else if mode == 1 {
+        clear_range(terminal, line_start, index)
+    } else {
+        clear_range(terminal, index, line_start + term_last_col())
+    }
+}
+
+// ---- ANSI parser ---------------------------------------------------------
+
+fn clamp(value: Int, low: Int, high: Int) -> Int {
+    if value < low { low } else if value > high { high } else { value }
+}
+
+fn parameter_or_one(value: Int) -> Int {
+    if value == 0 { 1 } else { value }
+}
+
+fn first_parameter(parameters: [Int]) -> Int {
+    match parameters { [] => 0, [value | _rest] => value }
+}
+
+fn second_parameter(parameters: [Int]) -> Int {
+    match parameters { [] => 0, [_first | rest] => first_parameter(rest) }
+}
+
+fn reverse_parameters(input: [Int], output: [Int]) -> [Int] {
+    match input {
+        [] => output,
+        [value | rest] => reverse_parameters(rest, [value | output])
+    }
+}
+
+fn finished_parameters(terminal: Terminal) -> [Int] {
+    reverse_parameters([terminal.current_parameter | terminal.parameters], [])
+}
+
+fn apply_sgr_flags(terminal: Terminal, code: Int) -> Terminal {
+    if code == 0 {
+        with_attributes(terminal, 7, 0, false, false)
+    } else if code == 1 {
+        with_attributes(terminal, terminal.foreground, terminal.background, true, terminal.reverse)
+    } else if code == 22 {
+        with_attributes(terminal, terminal.foreground, terminal.background, false, terminal.reverse)
+    } else if code == 7 {
+        with_attributes(terminal, terminal.foreground, terminal.background, terminal.bold, true)
+    } else if code == 27 {
+        with_attributes(terminal, terminal.foreground, terminal.background, terminal.bold, false)
+    } else {
+        terminal
+    }
+}
+
+fn apply_sgr_foreground(terminal: Terminal, code: Int) -> Terminal {
+    if code >= 30 && code <= 37 {
+        with_attributes(terminal, code - 30, terminal.background, terminal.bold, terminal.reverse)
+    } else if code == 39 {
+        with_attributes(terminal, 7, terminal.background, terminal.bold, terminal.reverse)
+    } else if code >= 90 && code <= 97 {
+        with_attributes(terminal, code - 82, terminal.background, terminal.bold, terminal.reverse)
+    } else {
+        terminal
+    }
+}
+
+fn apply_sgr_background(terminal: Terminal, code: Int) -> Terminal {
+    if code >= 40 && code <= 47 {
+        with_attributes(terminal, terminal.foreground, code - 40, terminal.bold, terminal.reverse)
+    } else if code == 49 {
+        with_attributes(terminal, terminal.foreground, 0, terminal.bold, terminal.reverse)
+    } else if code >= 100 && code <= 107 {
+        with_attributes(terminal, terminal.foreground, code - 92, terminal.bold, terminal.reverse)
+    } else {
+        terminal
+    }
+}
+
+fn apply_sgr_code(terminal: Terminal, code: Int) -> Terminal {
+    if code <= 27 {
+        apply_sgr_flags(terminal, code)
+    } else if code < 40 || (code >= 90 && code < 100) {
+        apply_sgr_foreground(terminal, code)
+    } else {
+        apply_sgr_background(terminal, code)
+    }
+}
+
+fn apply_sgr(terminal: Terminal, codes: [Int]) -> Terminal {
+    match codes {
+        [] => apply_sgr_code(terminal, 0),
+        _ => apply_sgr_codes(terminal, codes)
+    }
+}
+
+fn apply_sgr_codes(terminal: Terminal, codes: [Int]) -> Terminal {
+    match codes {
+        [] => terminal,
+        [code | rest] => apply_sgr_codes(apply_sgr_code(terminal, code), rest)
+    }
+}
+
+fn finish_csi_vertical(terminal: Terminal, command: Int, first: Int) -> Terminal {
+    if command == 65 {
+        with_cursor(terminal, terminal.column, clamp(terminal.row - parameter_or_one(first), 0, term_last_row()))
+    } else if command == 66 {
+        with_cursor(terminal, terminal.column, clamp(terminal.row + parameter_or_one(first), 0, term_last_row()))
+    } else if command == 69 {
+        with_cursor(terminal, 0, clamp(terminal.row + parameter_or_one(first), 0, term_last_row()))
+    } else {
+        with_cursor(terminal, 0, clamp(terminal.row - parameter_or_one(first), 0, term_last_row()))
+    }
+}
+
+fn finish_csi_horizontal(terminal: Terminal, command: Int, first: Int) -> Terminal {
+    if command == 67 {
+        with_cursor(terminal, clamp(terminal.column + parameter_or_one(first), 0, term_last_col()), terminal.row)
+    } else if command == 68 {
+        with_cursor(terminal, clamp(terminal.column - parameter_or_one(first), 0, term_last_col()), terminal.row)
+    } else {
+        with_cursor(terminal, clamp(parameter_or_one(first) - 1, 0, term_last_col()), terminal.row)
+    }
+}
+
+fn finish_csi_position(terminal: Terminal, parameters: [Int]) -> Terminal {
+    let row = clamp(parameter_or_one(first_parameter(parameters)) - 1, 0, term_last_row())
+    let column = clamp(parameter_or_one(second_parameter(parameters)) - 1, 0, term_last_col())
+    with_cursor(terminal, column, row)
+}
+
+fn finish_csi_other(terminal: Terminal, command: Int, parameters: [Int]) -> Terminal {
+    let first = first_parameter(parameters)
+    if command == 74 {
+        erase_display(terminal, first)
+    } else if command == 75 {
+        erase_line(terminal, first)
+    } else if command == 109 {
+        apply_sgr(terminal, parameters)
+    } else if command == 115 {
+        with_saved_cursor(terminal, terminal.column, terminal.row)
+    } else if command == 117 {
+        with_cursor(terminal, terminal.saved_column, terminal.saved_row)
+    } else {
+        terminal
+    }
+}
+
+fn finish_csi(terminal: Terminal, command: Int, parameters: [Int]) -> Terminal {
+    let first = first_parameter(parameters)
+    if command == 65 || command == 66 || command == 69 || command == 70 {
+        finish_csi_vertical(terminal, command, first)
+    } else if command == 67 || command == 68 || command == 71 {
+        finish_csi_horizontal(terminal, command, first)
+    } else if command == 72 || command == 102 {
+        finish_csi_position(terminal, parameters)
+    } else {
+        finish_csi_other(terminal, command, parameters)
+    }
+}
+
+fn handle_ground(terminal: Terminal, byte: Int) -> Terminal {
+    if byte == 27 {
+        with_parser(terminal, 1, 0, false, [])
+    } else if byte == 13 || byte == 10 {
+        line_feed(with_cursor(terminal, 0, terminal.row))
+    } else if byte == 8 || byte == 127 {
+        backspace(terminal)
+    } else if byte == 9 {
+        put_spaces(terminal, 8 - band(terminal.column, 7))
+    } else if byte >= 32 && byte <= 126 {
+        put_character(terminal, byte)
+    } else {
+        terminal
+    }
+}
+
+fn handle_escape(terminal: Terminal, byte: Int) -> Terminal {
+    let plain = reset_parser(terminal)
+    if byte == 91 {
+        with_parser(terminal, 2, 0, false, [])
+    } else if byte == 55 {
+        with_saved_cursor(plain, terminal.column, terminal.row)
+    } else if byte == 56 {
+        with_cursor(plain, terminal.saved_column, terminal.saved_row)
+    } else if byte == 99 {
+        erase_display(with_attributes(with_cursor(plain, 0, 0), 7, 0, false, false), 2)
+    } else {
+        plain
+    }
+}
+
+fn handle_csi(terminal: Terminal, byte: Int) -> Terminal {
+    if byte >= 48 && byte <= 57 {
+        with_parser(terminal, 2, terminal.current_parameter * 10 + byte - 48, true, terminal.parameters)
+    } else if byte == 59 {
+        with_parser(terminal, 2, 0, false, [terminal.current_parameter | terminal.parameters])
+    } else if byte == 63 {
+        // DEC private marker.  The supported mode commands are harmlessly
+        // ignored, but the final byte still terminates the sequence.
+        terminal
+    } else {
+        finish_csi(reset_parser(terminal), byte, finished_parameters(terminal))
+    }
+}
+
+fn handle_byte(terminal: Terminal, byte: Int) -> Terminal {
+    if terminal.parser == 0 {
+        handle_ground(terminal, byte)
+    } else if terminal.parser == 1 {
+        handle_escape(terminal, byte)
+    } else {
+        handle_csi(terminal, byte)
+    }
+}
+
+fn feed_bytes(terminal: Terminal, bytes: [Int]) -> Terminal {
+    match bytes {
+        [] => terminal,
+        [byte | rest] => feed_bytes(handle_byte(terminal, byte), rest)
+    }
+}
+
+fn serial_read(port: Int) -> Int {
+    let _submitted = ygg::port_submit(port, 2, 0, 0, 201)
+    receive {
+        (:port_reply, _port, _tag, byte) => byte
+    }
+}
+
+fn serial_try_read(port: Int) -> Int {
+    let _submitted = ygg::port_submit(port, 4, 0, 0, 202)
+    receive {
+        (:port_reply, _port, _tag, byte) => byte
+    }
+}
+
+fn drain_input(terminal: Terminal) -> Terminal {
+    let byte = serial_try_read(terminal.screen.serial)
+    if byte < 0 {
+        terminal
+    } else {
+        drain_input(handle_byte(terminal, byte))
+    }
+}
+
+fn terminal_step(terminal: Terminal) -> Terminal {
+    let byte = serial_try_read(terminal.screen.serial)
+    if byte < 0 {
+        terminal
+    } else {
+        show_cursor(drain_input(handle_byte(hide_cursor(terminal), byte)))
+    }
+}
+
+fn terminal_loop(terminal: Terminal, frames: Int, last_ms: Int, fps: Int) -> Bool {
+    let now = ygg::ticks()
+    let next = terminal_step(terminal)
+    match term_roll_fps(now, frames, last_ms, fps) {
+        [frames2, last2, fps2 | _rest] => {
+            let _shown = term_present_frame(next, fps2)
+            receive {
+                after 16 => terminal_loop(next, frames2, last2, fps2)
+            }
+        },
+        _ => false
+    }
+}
+
+fn banner_title(terminal: Terminal) -> Terminal {
+    feed_bytes(terminal, [
+        27, 91, 49, 59, 51, 54, 109,
+        89, 103, 103, 100, 114, 97, 115, 105, 108, 32, 76, 117, 120, 32, 84, 101, 114, 109, 105, 110, 97, 108,
+        27, 91, 48, 109, 10
+    ])
+}
+
+fn banner_info(terminal: Terminal) -> Terminal {
+    feed_bytes(terminal, binary_to_list("40x25 Adwaita Mono AA on virgl GPU\n"))
+}
+
+fn banner_tcp(terminal: Terminal) -> Terminal {
+    feed_bytes(terminal, binary_to_list("TCP REPL: nc 127.0.0.1 17888\n"))
+}
+
+fn banner_hint(terminal: Terminal) -> Terminal {
+    feed_bytes(terminal, [
+        84, 121, 112, 101, 32, 104, 101, 114, 101, 59, 32, 69, 83, 67, 91, 51, 49, 109, 32, 115, 101, 116, 115, 32, 99, 111, 108, 111, 114, 46, 10, 10
+    ])
+}
+
+fn banner_prompt(terminal: Terminal) -> Terminal {
+    feed_bytes(terminal, [27, 91, 51, 50, 109, 62, 32, 27, 91, 48, 109])
+}
+
+fn show_banner_line(terminal: Terminal, next: Terminal) -> Terminal {
+    let _presented = term_present(next)
+    next
+}
+
+fn show_banner(terminal: Terminal) -> Terminal {
+    show_banner_line(
+        terminal,
+        banner_prompt(show_banner_line(
+            terminal,
+            banner_hint(show_banner_line(
+                terminal,
+                banner_tcp(show_banner_line(
+                    terminal,
+                    banner_info(show_banner_line(terminal, banner_title(terminal)))
+                ))
+            ))
+        ))
+    )
+}
+
+fn term_count_lit(pixels: String, index: Int, remaining: Int, acc: Int) -> Int {
+    if remaining == 0 {
+        acc
+    } else {
+        let b = font_byte(pixels, index)
+        let g = font_byte(pixels, index + 1)
+        let r = font_byte(pixels, index + 2)
+        let next = if r + g + b > 0 { acc + 1 } else { acc }
+        term_count_lit(pixels, index + 4, remaining - 1, next)
+    }
+}
+
+fn term_cell_lit_at(color: Int, row: Int) -> Int {
+    let offset = row * term_width() * font_cell_height() * 4
+    let cell = ygg::buf_read(color, offset, font_cell_width() * font_cell_height() * 4)
+    term_count_lit(cell, 0, font_cell_width() * font_cell_height(), 0)
+}
+
+fn term_verify_scanout(port: Int, serial: Int, color: Int, mode: Int) -> Bool {
+    let ready = if mode == 1 {
+        gpu_text_download(port, term_width(), term_height())
+    } else {
+        true
+    }
+    if !ready {
+        term_say(serial, binary_to_list("[terminal] readback failed\n"))
+    } else {
+        let top = term_cell_lit_at(color, 0)
+        let bottom = term_cell_lit_at(color, term_last_row())
+        if top + bottom > 8 {
+            term_say(serial, binary_to_list("[terminal] gpu text visible\n"))
+        } else {
+            term_say(serial, binary_to_list("[terminal] gpu text blank\n"))
+        }
+    }
+}
+
+fn term_say(serial: Int, bytes: [Int]) -> Bool {
+    match bytes {
+        [] => true,
+        [byte | rest] => {
+            let _written = ygg::port_submit(serial, 1, byte, 0, 0 - 1)
+            term_say(serial, rest)
+        }
+    }
+}
+
+// Kernel entry used by `cargo xtask watch`. Input is QEMU's serial stdio;
+// output is the virtio-gpu GTK window.
+fn terminal() -> Bool {
+    let gpu = ygg::port_open(3)
+    let serial = ygg::port_open(0)
+    let vbo = ygg::buf_new(gpu_text_vbo_bytes())
+    let color = ygg::buf_new(term_width() * term_height() * 4)
+    let chars = ygg::buf_new(term_cells())
+    let foregrounds = ygg::buf_new(term_cells())
+    let backgrounds = ygg::buf_new(term_cells())
+    let dirty = ygg::buf_new(16)
+    let _characters = ygg::buf_write(chars, 0, repeat_binary(list_to_binary([32]), term_cells()))
+    let _foregrounds = ygg::buf_write(foregrounds, 0, repeat_binary(list_to_binary([7]), term_cells()))
+    let _note = term_say(serial, binary_to_list("[terminal] gpu setup\n"))
+    let mode = term_setup_gpu(gpu, serial, vbo, color)
+    if mode < 0 {
+        let _fail = term_say(serial, binary_to_list("[terminal] gpu setup failed\n"))
+        false
+    } else {
+        let _ok = term_say(serial, binary_to_list("[terminal] scanout live, drawing banner\n"))
+        let screen = Screen {
+            gpu: gpu,
+            serial: serial,
+            vbo: vbo,
+            color: color,
+            chars: chars,
+            foregrounds: foregrounds,
+            backgrounds: backgrounds,
+            dirty: dirty,
+            mode: mode
+        }
+        let initial = Terminal {
+            screen: screen,
+            column: 0,
+            row: 0,
+            saved_column: 0,
+            saved_row: 0,
+            foreground: 7,
+            background: 0,
+            bold: false,
+            reverse: false,
+            parser: 0,
+            current_parameter: 0,
+            has_parameter: false,
+            parameters: []
+        }
+        let started = show_cursor(show_banner(initial))
+        let _ready = term_say(serial, binary_to_list("[terminal] banner presented\n"))
+        let _final = term_present_frame(started, 0)
+        let _checked = term_verify_scanout(gpu, serial, color, mode)
+        terminal_loop(started, 0, ygg::ticks(), 0)
+    }
+}
+
+// Pure BEAM-side smoke test used by the examples suite. Hardware is touched
+// only through terminal(), which Yggdrasil invokes explicitly.
+fn pure_terminal() -> Terminal {
+    Terminal {
+        screen: Screen {
+            gpu: 0,
+            serial: 0,
+            vbo: 0,
+            color: 0,
+            chars: 0,
+            foregrounds: 0,
+            backgrounds: 0,
+            dirty: 0,
+            mode: 0
+        },
+        column: 0,
+        row: 0,
+        saved_column: 0,
+        saved_row: 0,
+        foreground: 7,
+        background: 0,
+        bold: false,
+        reverse: false,
+        parser: 0,
+        current_parameter: 0,
+        has_parameter: false,
+        parameters: []
+    }
+}
+
+fn main() -> Bool {
+    let positioned = feed_bytes(pure_terminal(), [27, 91, 49, 48, 59, 50, 48, 72])
+    let colored = feed_bytes(pure_terminal(), [27, 91, 49, 59, 51, 49, 59, 52, 52, 109])
+    gpu_text_self_test()
+        && parameter_or_one(0) == 1
+        && clamp(50, 0, term_last_col()) == term_last_col()
+        && positioned.row == 9
+        && positioned.column == 19
+        && colored.foreground == 1
+        && colored.background == 4
+        && colored.bold
+}

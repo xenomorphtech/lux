@@ -317,6 +317,20 @@ Value lux_rt_string_concat(Value a, Value b) {
     return ((int64_t)(intptr_t)ptr) | TAG_BOXED;
 }
 
+Value lux_rt_binary_at(Value value, Value index_value) {
+    if ((value & TAG_MASK) != TAG_BOXED || (index_value & TAG_MASK) != TAG_INT) {
+        return VALUE_NIL;
+    }
+    Value* boxed = (Value*)((intptr_t)(value & ~TAG_MASK));
+    if (boxed[0] != BOXED_STRING) return VALUE_NIL;
+    int64_t index = index_value >> TAG_BITS;
+    if (index < 0 || index >= lux_rt_string_length(value)) {
+        return VALUE_NIL;
+    }
+    unsigned char byte = (unsigned char)lux_rt_string_data(value)[index];
+    return (((int64_t)byte) << TAG_BITS) | TAG_INT;
+}
+
 Value lux_rt_binary_slice(Value value, Value start_value, Value length_value) {
     if ((value & TAG_MASK) != TAG_BOXED ||
         (start_value & TAG_MASK) != TAG_INT ||

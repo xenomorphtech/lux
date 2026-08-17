@@ -1,0 +1,127 @@
+// Reusable Alacritty-style font library for Lux/Yggdrasil.
+//
+// Host-side fontdue rasterizes a real monospace face into an 8-bit coverage
+// atlas (`font_atlas.lux`). This file composites those glyphs onto a B8G8R8X8
+// framebuffer with integer coverage blending — the same model Alacritty uses
+// before the GPU upload. `font_blit` is the device-facing entry; everything
+// else is pure and host-testable.
+mod font
+
+use font_atlas
+
+extern {
+    fn ygg::buf_write(Int, Int, String) -> Int
+}
+
+fn font_byte(bytes: String, index: Int) -> Int {
+    binary_at(bytes, index)
+}
+
+// Exact for 0..=255*255: (x + 1 + (x >> 8)) >> 8.
+fn font_div255(x: Int) -> Int {
+    bsr(x + 1 + bsr(x, 8), 8)
+}
+
+fn font_mix_channel(foreground: Int, background: Int, coverage: Int) -> Int {
+    if coverage == 0 {
+        background
+    } else if coverage == 255 {
+        foreground
+    } else {
+        font_div255(foreground * coverage + background * (255 - coverage))
+    }
+}
+
+fn font_mix_pixel(foreground: String, background: String, coverage: Int) -> String {
+    if coverage == 0 {
+        background
+    } else if coverage == 255 {
+        foreground
+    } else {
+        list_to_binary([
+            font_mix_channel(font_byte(foreground, 0), font_byte(background, 0), coverage),
+            font_mix_channel(font_byte(foreground, 1), font_byte(background, 1), coverage),
+            font_mix_channel(font_byte(foreground, 2), font_byte(background, 2), coverage),
+            0
+        ])
+    }
+}
+
+fn font_glyph_index(character: Int) -> Int {
+    if character >= 32 && character <= 126 {
+        character - 32
+    } else {
+        95
+    }
+}
+
+fn font_coverage(character: Int) -> String {
+    let bytes = font_cell_width() * font_cell_height()
+    binary_slice(font_atlas(), font_glyph_index(character) * bytes, bytes)
+}
+
+fn font_raster_pixels(coverage: String, index: Int, remaining: Int, foreground: String, background: String, acc: String) -> String {
+    if remaining == 0 {
+        acc
+    } else {
+        font_raster_pixels(
+            coverage,
+            index + 1,
+            remaining - 1,
+            foreground,
+            background,
+            acc ++ font_mix_pixel(foreground, background, font_byte(coverage, index))
+        )
+    }
+}
+
+fn font_raster_scanline(coverage: String, row: Int, foreground: String, background: String) -> String {
+    font_raster_pixels(coverage, row * font_cell_width(), font_cell_width(), foreground, background, <<"">>)
+}
+
+fn font_blit_rows(backing: Int, stride: Int, x: Int, y: Int, coverage: String, foreground: String, background: String, row: Int) -> Bool {
+    if row == font_cell_height() {
+        true
+    } else {
+        let scanline = font_raster_scanline(coverage, row, foreground, background)
+        let offset = ((y + row) * stride + x) * 4
+        let _written = ygg::buf_write(backing, offset, scanline)
+        font_blit_rows(backing, stride, x, y, coverage, foreground, background, row + 1)
+    }
+}
+
+// Composite `character` at pixel (x, y) into a pinned B8G8R8X8 buffer.
+// `stride` is the framebuffer width in pixels.
+fn font_blit(backing: Int, stride: Int, x: Int, y: Int, character: Int, foreground: String, background: String) -> Bool {
+    font_blit_rows(backing, stride, x, y, font_coverage(character), foreground, background, 0)
+}
+
+fn font_blit_text(backing: Int, stride: Int, x: Int, y: Int, bytes: [Int], foreground: String, background: String) -> Bool {
+    match bytes {
+        [] => true,
+        [character | rest] => {
+            let _drawn = font_blit(backing, stride, x, y, character, foreground, background)
+            font_blit_text(backing, stride, x + font_cell_width(), y, rest, foreground, background)
+        }
+    }
+}
+
+fn font_self_test() -> Bool {
+    let space = font_coverage(32)
+    let capital_a = font_coverage(65)
+    let mixed = font_mix_channel(255, 0, 128)
+    let scanline = font_raster_scanline(capital_a, 0, list_to_binary([0, 0, 255, 0]), list_to_binary([0, 0, 0, 0]))
+    byte_size(font_atlas()) == font_cell_width() * font_cell_height() * 96
+        && byte_size(space) == font_cell_width() * font_cell_height()
+        && font_byte(space, 0) == 0
+        && font_byte(capital_a, font_ink_sample()) > 128
+        && mixed >= 127
+        && mixed <= 129
+        && byte_size(scanline) == font_cell_width() * 4
+        && font_glyph_index(65) == 33
+        && font_glyph_index(7) == 95
+}
+
+fn main() -> Bool {
+    font_self_test()
+}

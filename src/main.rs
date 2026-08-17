@@ -184,6 +184,13 @@ fn main() {
             process::exit(1);
         }
     };
+    let source = match lux::driver::libs::expand_uses(&source, Path::new(&filename)) {
+        Ok(expanded) => expanded,
+        Err(error) => {
+            eprintln!("Library include error: {error}");
+            process::exit(1);
+        }
+    };
 
     if native_mode && yggdrasil_mode {
         eprintln!("--native and --yggdrasil select different backends and cannot be combined");

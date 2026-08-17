@@ -2384,6 +2384,8 @@ impl Translator {
                                 "binary_part".to_string(),
                                 arg_exprs,
                             )
+                        } else if name == "binary_at" && arg_exprs.len() == 2 {
+                            CoreExpr::Call("binary".to_string(), "at".to_string(), arg_exprs)
                         } else if name == "str_char_at" && arg_exprs.len() == 2 {
                             let args: Vec<_> = arg_exprs.into_iter().collect();
                             CoreExpr::Call(
@@ -2626,6 +2628,8 @@ impl Translator {
                                 "binary_part".to_string(),
                                 arg_exprs,
                             )
+                        } else if name == "binary_at" && arg_exprs.len() == 2 {
+                            CoreExpr::Call("binary".to_string(), "at".to_string(), arg_exprs)
                         } else if name == "binary_to_list" && arg_exprs.len() == 1 {
                             CoreExpr::Call(
                                 "erlang".to_string(),

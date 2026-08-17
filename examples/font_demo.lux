@@ -1,0 +1,52 @@
+// Present a grayscale pangram through virtio-gpu so the host can screendump
+// antialiased pixels. Hardware is only touched from font_scene().
+mod font_demo
+
+use font
+use gpu
+
+extern {
+    fn ygg::port_open(Int) -> Int
+    fn ygg::bin_to_buf(String) -> Int
+}
+
+fn font_demo_cols() -> Int { 32 }
+fn font_demo_rows() -> Int { 2 }
+fn font_demo_width() -> Int { font_demo_cols() * font_cell_width() }
+fn font_demo_height() -> Int { font_demo_rows() * font_cell_height() }
+fn font_demo_resource() -> Int { 11 }
+
+fn font_demo_fg() -> String {
+    list_to_binary([236, 236, 236, 0])
+}
+
+fn font_demo_bg() -> String {
+    list_to_binary([22, 18, 18, 0])
+}
+
+fn font_demo_repeat(chunk: String, count: Int) -> String {
+    if count == 0 {
+        <<"">>
+    } else {
+        let half = font_demo_repeat(chunk, bsr(count, 1))
+        let doubled = half ++ half
+        if band(count, 1) == 0 { doubled } else { doubled ++ chunk }
+    }
+}
+
+fn font_scene() -> Bool {
+    let port = ygg::port_open(3)
+    let pixels = font_demo_width() * font_demo_height()
+    let backing = ygg::bin_to_buf(font_demo_repeat(font_demo_bg(), pixels))
+    let ready = gpu_scanout_enabled(gpu_get_display_info(port))
+        && gpu_create_2d(port, font_demo_resource(), gpu_format_b8g8r8x8(), font_demo_width(), font_demo_height())
+        && gpu_attach_backing(port, font_demo_resource(), backing)
+        && gpu_set_scanout(port, 0, font_demo_resource(), font_demo_width(), font_demo_height())
+    let line0 = font_blit_text(backing, font_demo_width(), 0, 0, binary_to_list("Yggdrasil Lux Terminal"), font_demo_fg(), font_demo_bg())
+    let line1 = font_blit_text(backing, font_demo_width(), 0, font_cell_height(), binary_to_list("The quick brown fox 0123"), font_demo_fg(), font_demo_bg())
+    ready && line0 && line1 && gpu_present(port, font_demo_resource(), font_demo_width(), font_demo_height())
+}
+
+fn main() -> Bool {
+    font_self_test() && gpu_self_test()
+}

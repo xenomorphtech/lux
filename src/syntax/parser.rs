@@ -852,6 +852,9 @@ impl Parser {
                             break;
                         }
                         self.advance();
+                        if self.check(&TokenKind::GtGt) {
+                            break;
+                        }
                     }
                 }
                 self.expect(&TokenKind::GtGt)?;

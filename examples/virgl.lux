@@ -1,0 +1,8 @@
+// Host-side smoke test for the reusable virgl command library.
+mod virgl_example
+
+use virgl
+
+fn main() -> Bool {
+    virgl_self_test()
+}

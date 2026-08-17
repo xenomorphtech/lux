@@ -371,6 +371,7 @@ impl NativeCompiler {
         declare(module, "lux_rt_string_concat", 2, 1)?;
         declare(module, "lux_rt_make_string", 2, 1)?;
         declare(module, "lux_rt_binary_slice", 3, 1)?;
+        declare(module, "lux_rt_binary_at", 2, 1)?;
         declare(module, "lux_rt_match_error", 0, 0)?;
         declare(module, "lux_rt_case_clause_error", 1, 0)?;
         declare(module, "lux_rt_erlang_error", 1, 0)?;
@@ -977,6 +978,16 @@ impl NativeCompiler {
         // Handle erlang BIFs
         if module == "erlang" {
             return self.translate_erlang_bif(builder, func, args, vars, self_module, obj_module);
+        }
+
+        // Allocation-free byte indexing (the `binary_at` builtin).
+        if module == "binary" && func == "at" && args.len() == 2 {
+            let bin_val = self.translate_expr(builder, &args[0], vars, self_module, obj_module);
+            let idx_val = self.translate_expr(builder, &args[1], vars, self_module, obj_module);
+            let rt = self.rt_func_ids["lux_rt_binary_at"];
+            let rt_ref = obj_module.declare_func_in_func(rt, builder.func);
+            let call = builder.ins().call(rt_ref, &[bin_val, idx_val]);
+            return builder.inst_results(call)[0];
         }
 
         // Handle io:format (used by print)

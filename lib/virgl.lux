@@ -1,0 +1,394 @@
+// Reusable virtio-gpu 3D / virgl command encoders.
+//
+// The kernel gpu port is a raw transport: these functions produce the opaque
+// control buffers a Lux driver submits through `gpu_ctrl`. 2D scanout still
+// works on virtio-gpu; the 3D commands need VIRGL negotiated
+// (`-device virtio-gpu-gl`) so QEMU's virglrenderer accepts a context.
+mod virgl
+
+use gpu
+
+extern {
+    fn ygg::port_open(Int) -> Int
+}
+
+fn virgl_cmd_get_capset_info(index: Int) -> String {
+    list_to_binary(gpu_header(264) ++ gpu_le32(index) ++ gpu_le32(0))
+}
+
+fn virgl_cmd_get_capset(capset_id: Int, version: Int) -> String {
+    list_to_binary(gpu_header(265) ++ gpu_le32(capset_id) ++ gpu_le32(version))
+}
+
+fn virgl_name_bytes(name: String) -> [Int] {
+    let bytes = binary_to_list(name)
+    let n = byte_size(name)
+    if n >= 64 { bytes } else { bytes ++ gpu_zeros(64 - n) }
+}
+
+fn virgl_cmd_ctx_create(ctx_id: Int, capset_id: Int, name: String) -> String {
+    let nlen = byte_size(name)
+    list_to_binary(
+        gpu_header_ctx(512, ctx_id)
+            ++ gpu_le32(nlen)
+            ++ gpu_le32(capset_id)
+            ++ virgl_name_bytes(name)
+    )
+}
+
+fn virgl_cmd_ctx_destroy(ctx_id: Int) -> String {
+    list_to_binary(gpu_header_ctx(513, ctx_id))
+}
+
+fn virgl_cmd_ctx_attach(ctx_id: Int, resource_id: Int) -> String {
+    list_to_binary(gpu_header_ctx(514, ctx_id) ++ gpu_le32(resource_id) ++ gpu_le32(0))
+}
+
+fn virgl_cmd_ctx_detach(ctx_id: Int, resource_id: Int) -> String {
+    list_to_binary(gpu_header_ctx(515, ctx_id) ++ gpu_le32(resource_id) ++ gpu_le32(0))
+}
+
+fn virgl_cmd_resource_create_3d(
+    ctx_id: Int,
+    resource_id: Int,
+    target: Int,
+    format: Int,
+    bind: Int,
+    width: Int,
+    height: Int,
+    depth: Int,
+    array_size: Int,
+    last_level: Int,
+    samples: Int,
+    flags: Int
+) -> String {
+    list_to_binary(
+        gpu_header_ctx(516, ctx_id)
+            ++ gpu_le32(resource_id)
+            ++ gpu_le32(target)
+            ++ gpu_le32(format)
+            ++ gpu_le32(bind)
+            ++ gpu_le32(width)
+            ++ gpu_le32(height)
+            ++ gpu_le32(depth)
+            ++ gpu_le32(array_size)
+            ++ gpu_le32(last_level)
+            ++ gpu_le32(samples)
+            ++ gpu_le32(flags)
+            ++ gpu_le32(0)
+    )
+}
+
+fn virgl_cmd_submit_3d(ctx_id: Int, commands: String) -> String {
+    list_to_binary(gpu_header_ctx(519, ctx_id) ++ gpu_le32(byte_size(commands)) ++ gpu_le32(0)) ++ commands
+}
+
+fn virgl_box(x: Int, y: Int, z: Int, w: Int, h: Int, d: Int) -> [Int] {
+    gpu_le32(x) ++ gpu_le32(y) ++ gpu_le32(z) ++ gpu_le32(w) ++ gpu_le32(h) ++ gpu_le32(d)
+}
+
+fn virgl_cmd_transfer_to_host_3d(
+    ctx_id: Int,
+    resource_id: Int,
+    x: Int,
+    y: Int,
+    z: Int,
+    w: Int,
+    h: Int,
+    d: Int,
+    offset: Int,
+    level: Int,
+    stride: Int,
+    layer_stride: Int
+) -> String {
+    list_to_binary(
+        gpu_header_ctx(517, ctx_id)
+            ++ virgl_box(x, y, z, w, h, d)
+            ++ gpu_le32(offset)
+            ++ gpu_zeros(4)
+            ++ gpu_le32(resource_id)
+            ++ gpu_le32(level)
+            ++ gpu_le32(stride)
+            ++ gpu_le32(layer_stride)
+    )
+}
+
+fn virgl_cmd_transfer_from_host_3d(
+    ctx_id: Int,
+    resource_id: Int,
+    x: Int,
+    y: Int,
+    z: Int,
+    w: Int,
+    h: Int,
+    d: Int,
+    offset: Int,
+    level: Int,
+    stride: Int,
+    layer_stride: Int
+) -> String {
+    list_to_binary(
+        gpu_header_ctx(518, ctx_id)
+            ++ virgl_box(x, y, z, w, h, d)
+            ++ gpu_le32(offset)
+            ++ gpu_zeros(4)
+            ++ gpu_le32(resource_id)
+            ++ gpu_le32(level)
+            ++ gpu_le32(stride)
+            ++ gpu_le32(layer_stride)
+    )
+}
+
+fn virgl_cmd_resource_unref(resource_id: Int) -> String {
+    list_to_binary(gpu_header(258) ++ gpu_le32(resource_id) ++ gpu_le32(0))
+}
+
+// virglrenderer command stream: opcode | (object << 8) | (length << 16), then `length` payload words.
+fn virgl_cmd0(cmd: Int, obj: Int, length: Int) -> Int {
+    cmd + bsl(obj, 8) + bsl(length, 16)
+}
+
+fn virgl_ccw(opcode: Int, length: Int) -> Int {
+    virgl_cmd0(opcode, 0, length)
+}
+
+fn virgl_words(values: [Int]) -> String {
+    match values {
+        [] => <<"">>,
+        [value | rest] => list_to_binary(gpu_le32(value)) ++ virgl_words(rest)
+    }
+}
+
+fn virgl_ccw_clear(buffers: Int, r: Int, g: Int, b: Int, a: Int) -> String {
+    virgl_words([virgl_ccw(7, 8), buffers, r, g, b, a, 0, 0, 0])
+}
+
+fn virgl_ccw_create_sub_ctx(sub_ctx: Int) -> String {
+    virgl_words([virgl_cmd0(29, 0, 1), sub_ctx])
+}
+
+fn virgl_ccw_set_sub_ctx(sub_ctx: Int) -> String {
+    virgl_words([virgl_cmd0(28, 0, 1), sub_ctx])
+}
+
+fn virgl_ccw_bind(obj: Int, handle: Int) -> String {
+    virgl_words([virgl_cmd0(2, obj, 1), handle])
+}
+
+fn virgl_ccw_bind_shader(handle: Int, shader_type: Int) -> String {
+    virgl_words([virgl_cmd0(31, 0, 2), handle, shader_type])
+}
+
+fn virgl_ccw_create_blend(handle: Int) -> String {
+    let mask = bsl(15, 27)
+    virgl_words([
+        virgl_cmd0(1, 1, 11),
+        handle,
+        0,
+        0,
+        mask,
+        mask,
+        mask,
+        mask,
+        mask,
+        mask,
+        mask,
+        mask
+    ])
+}
+
+fn virgl_ccw_create_dsa(handle: Int) -> String {
+    virgl_words([virgl_cmd0(1, 3, 5), handle, 0, 0, 0, 0])
+}
+
+fn virgl_ccw_create_rasterizer(handle: Int) -> String {
+    let one = 1065353216
+    let s0 = 2 + bsl(1, 29) + bsl(1, 30)
+    virgl_words([virgl_cmd0(1, 2, 9), handle, s0, one, 0, 0, one, 0, 0, 0])
+}
+
+fn virgl_ccw_create_surface(handle: Int, resource_id: Int, format: Int) -> String {
+    virgl_words([virgl_cmd0(1, 8, 5), handle, resource_id, format, 0, 0])
+}
+
+fn virgl_ccw_set_framebuffer(surface: Int) -> String {
+    virgl_words([virgl_cmd0(5, 0, 3), 1, 0, surface])
+}
+
+fn virgl_ccw_set_viewport(scale_x: Int, scale_y: Int, translate_x: Int, translate_y: Int) -> String {
+    let half = 1056964608
+    virgl_words([virgl_cmd0(4, 0, 7), 0, scale_x, scale_y, half, translate_x, translate_y, half])
+}
+
+fn virgl_ccw_create_ve(handle: Int) -> String {
+    let fmt = 31
+    virgl_words([
+        virgl_cmd0(1, 5, 9),
+        handle,
+        0, 0, 0, fmt,
+        16, 0, 0, fmt
+    ])
+}
+
+fn virgl_ccw_set_vertex_buffers(stride: Int, offset: Int, resource_id: Int) -> String {
+    virgl_words([virgl_cmd0(6, 0, 3), stride, offset, resource_id])
+}
+
+fn virgl_ccw_create_sampler_state(handle: Int) -> String {
+    virgl_words([virgl_cmd0(1, 7, 9), handle, 146, 0, 0, 0, 0, 0, 0, 0])
+}
+
+fn virgl_ccw_create_sampler_view(handle: Int, resource_id: Int, format: Int) -> String {
+    virgl_words([virgl_cmd0(1, 6, 6), handle, resource_id, format, 0, 0, 0])
+}
+
+fn virgl_ccw_bind_sampler_states(shader_type: Int, handle: Int) -> String {
+    virgl_words([virgl_cmd0(18, 0, 3), shader_type, 0, handle])
+}
+
+fn virgl_ccw_set_sampler_views(shader_type: Int, handle: Int) -> String {
+    virgl_words([virgl_cmd0(10, 0, 3), shader_type, 0, handle])
+}
+
+fn virgl_pad4(bytes: String) -> String {
+    let n = band(byte_size(bytes), 3)
+    if n == 0 { bytes } else { bytes ++ list_to_binary(gpu_zeros(4 - n)) }
+}
+
+fn virgl_ccw_create_shader(handle: Int, shader_type: Int, text: String) -> String {
+    let padded = virgl_pad4(text ++ list_to_binary([0]))
+    let nwords = bsr(byte_size(padded), 2)
+    virgl_words([virgl_cmd0(1, 4, 5 + nwords), handle, shader_type, byte_size(text) + 1, 300, 0]) ++ padded
+}
+
+fn virgl_ccw_inline_write(resource_id: Int, offset: Int, bytes: String) -> String {
+    let padded = virgl_pad4(bytes)
+    let nwords = bsr(byte_size(padded), 2)
+    virgl_words([
+        virgl_ccw(9, 11 + nwords),
+        resource_id,
+        0,
+        0,
+        0,
+        0,
+        offset,
+        0,
+        0,
+        byte_size(bytes),
+        1,
+        1
+    ]) ++ padded
+}
+
+fn virgl_ccw_inline_write_2d(resource_id: Int, width: Int, height: Int, stride: Int, bytes: String) -> String {
+    let padded = virgl_pad4(bytes)
+    let nwords = bsr(byte_size(padded), 2)
+    virgl_words([
+        virgl_ccw(9, 11 + nwords),
+        resource_id,
+        0,
+        0,
+        stride,
+        0,
+        0,
+        0,
+        0,
+        width,
+        height,
+        1
+    ]) ++ padded
+}
+
+fn virgl_ccw_draw_vbo(start: Int, count: Int) -> String {
+    virgl_words([
+        virgl_ccw(8, 12),
+        start,
+        count,
+        4,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        count - 1,
+        0
+    ])
+}
+
+fn virgl_submit(port: Int, ctx_id: Int, commands: String) -> Bool {
+    gpu_ok(gpu_ctrl(port, virgl_cmd_submit_3d(ctx_id, commands), 24))
+}
+
+fn virgl_capset_virgl() -> Int { 1 }
+fn virgl_capset_virgl2() -> Int { 2 }
+fn virgl_ok_capset_info() -> Int { 4354 }
+fn virgl_ok_capset() -> Int { 4355 }
+fn virgl_format_b8g8r8a8() -> Int { 1 }
+fn virgl_format_b8g8r8x8() -> Int { 2 }
+fn virgl_format_r8() -> Int { 64 }
+fn virgl_target_buffer() -> Int { 0 }
+fn virgl_target_texture_2d() -> Int { 2 }
+fn virgl_bind_sampler() -> Int { 8 }
+fn virgl_bind_render() -> Int { 2 }
+fn virgl_bind_vertex() -> Int { 16 }
+fn virgl_bind_scanout() -> Int { 262274 }
+
+fn virgl_capset_id(response: String) -> Int {
+    gpu_le32_bin(response, 24)
+}
+
+fn virgl_capset_max_size(response: String) -> Int {
+    gpu_le32_bin(response, 32)
+}
+
+// Talk to the live gpu port. 0 = device has no virgl capset, 1 = context created,
+// 2 = create failed after a capset was advertised.
+fn virgl_probe() -> Int {
+    let port = ygg::port_open(3)
+    let info = gpu_ctrl(port, virgl_cmd_get_capset_info(0), 40)
+    if gpu_le32_bin(info, 0) != virgl_ok_capset_info() {
+        0
+    } else {
+        let capset = virgl_capset_id(info)
+        if gpu_ok(gpu_ctrl(port, virgl_cmd_ctx_create(1, capset, "lux"), 24)) {
+            1
+        } else {
+            2
+        }
+    }
+}
+
+fn virgl_self_test_headers() -> Bool {
+    let info = virgl_cmd_get_capset_info(0)
+    let ctx = virgl_cmd_ctx_create(1, virgl_capset_virgl(), "lux")
+    byte_size(info) == 32
+        && byte_size(ctx) == 96
+        && gpu_le32_bin(info, 0) == 264
+}
+
+fn virgl_self_test_commands() -> Bool {
+    let res = virgl_cmd_resource_create_3d(1, 1, virgl_target_texture_2d(), virgl_format_b8g8r8x8(), virgl_bind_render(), 64, 64, 1, 1, 0, 0, 0)
+    let clear = virgl_ccw_clear(4, 0, 0, 255, 255)
+    byte_size(res) == 72
+        && byte_size(clear) == 36
+        && byte_size(virgl_cmd_submit_3d(1, clear)) == 68
+        && byte_size(virgl_cmd_resource_unref(1)) == 32
+}
+
+fn virgl_self_test_opcodes() -> Bool {
+    virgl_ccw(7, 8) == 524295
+        && virgl_cmd0(1, 4, 5) == 328705
+        && virgl_cmd0(31, 0, 2) == 131103
+        && virgl_cmd0(18, 0, 3) == 196626
+        && virgl_bind_scanout() == 262274
+}
+
+fn virgl_self_test() -> Bool {
+    gpu_self_test() && virgl_self_test_headers() && virgl_self_test_commands() && virgl_self_test_opcodes()
+}
+
+fn main() -> Bool {
+    virgl_self_test()
+}

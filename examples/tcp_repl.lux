@@ -1,0 +1,315 @@
+// A line-oriented REPL application for the Yggdrasil TCP adapter. The NIC,
+// ethernet, and ARP boundary remains in the kernel; TCP itself is provided by
+// tcp_ip.lux, while all command parsing and evaluation below is Lux bytecode.
+mod tcp_repl
+
+struct ReplParse {
+    value: Int,
+    next: Int,
+    ok: Bool
+}
+
+struct ReplDigit {
+    digit: Int,
+    remainder: Int
+}
+
+fn repl_parse_result(value: Int, next: Int, ok: Bool) -> ReplParse {
+    ReplParse { value: value, next: next, ok: ok }
+}
+
+fn repl_byte_at(line: String, index: Int) -> Int {
+    hd(binary_to_list(binary_slice(line, index, 1)))
+}
+
+fn repl_skip_spaces(line: String, index: Int) -> Int {
+    if index >= byte_size(line) {
+        index
+    } else {
+        let byte = repl_byte_at(line, index)
+        if byte == 32 || byte == 9 {
+            repl_skip_spaces(line, index + 1)
+        } else {
+            index
+        }
+    }
+}
+
+fn repl_parse_digits(line: String, index: Int, value: Int, seen: Bool) -> ReplParse {
+    if index >= byte_size(line) {
+        repl_parse_result(value, index, seen)
+    } else {
+        let byte = repl_byte_at(line, index)
+        if byte >= 48 && byte <= 57 {
+            repl_parse_digits(line, index + 1, value * 10 + byte - 48, true)
+        } else {
+            repl_parse_result(value, index, seen)
+        }
+    }
+}
+
+fn repl_parse_number(line: String, index: Int) -> ReplParse {
+    repl_parse_digits(line, repl_skip_spaces(line, index), 0, false)
+}
+
+fn repl_parse_factor(line: String, index: Int) -> ReplParse {
+    let input = repl_skip_spaces(line, index)
+    if input >= byte_size(line) {
+        repl_parse_result(0, input, false)
+    } else {
+        let byte = repl_byte_at(line, input)
+        if byte == 45 {
+            let factor = repl_parse_number(line, input + 1)
+            repl_parse_result(bnot(factor.value) + 1, factor.next, factor.ok)
+        } else if byte == 43 {
+            repl_parse_number(line, input + 1)
+        } else if byte == 40 {
+            let inner = repl_parse_expression(line, input + 1)
+            let trailing = repl_skip_spaces(line, inner.next)
+            if inner.ok && trailing < byte_size(line) && repl_byte_at(line, trailing) == 41 {
+                repl_parse_result(inner.value, trailing + 1, true)
+            } else {
+                repl_parse_result(0, trailing, false)
+            }
+        } else {
+            repl_parse_number(line, input)
+        }
+    }
+}
+
+fn repl_parse_product_tail(line: String, value: Int, index: Int) -> ReplParse {
+    let input = repl_skip_spaces(line, index)
+    if input < byte_size(line) {
+        let operator = repl_byte_at(line, input)
+        if operator == 42 {
+            let right = repl_parse_factor(line, input + 1)
+            if right.ok {
+                repl_parse_product_tail(line, value * right.value, right.next)
+            } else {
+                repl_parse_result(0, right.next, false)
+            }
+        } else {
+            repl_parse_result(value, input, true)
+        }
+    } else {
+        repl_parse_result(value, input, true)
+    }
+}
+
+fn repl_parse_product(line: String, index: Int) -> ReplParse {
+    let left = repl_parse_factor(line, index)
+    if left.ok {
+        repl_parse_product_tail(line, left.value, left.next)
+    } else {
+        left
+    }
+}
+
+fn repl_parse_expression_tail(line: String, value: Int, index: Int) -> ReplParse {
+    let input = repl_skip_spaces(line, index)
+    if input < byte_size(line) {
+        let operator = repl_byte_at(line, input)
+        if operator == 43 || operator == 45 {
+            let right = repl_parse_product(line, input + 1)
+            if right.ok {
+                let next = if operator == 43 { value + right.value } else { value - right.value }
+                repl_parse_expression_tail(line, next, right.next)
+            } else {
+                repl_parse_result(0, right.next, false)
+            }
+        } else {
+            repl_parse_result(value, input, true)
+        }
+    } else {
+        repl_parse_result(value, input, true)
+    }
+}
+
+fn repl_parse_expression(line: String, index: Int) -> ReplParse {
+    let left = repl_parse_product(line, index)
+    if left.ok {
+        repl_parse_expression_tail(line, left.value, left.next)
+    } else {
+        left
+    }
+}
+
+fn repl_parse_complete(line: String) -> ReplParse {
+    let parsed = repl_parse_expression(line, 0)
+    let trailing = repl_skip_spaces(line, parsed.next)
+    if parsed.ok && trailing == byte_size(line) {
+        repl_parse_result(parsed.value, trailing, true)
+    } else {
+        repl_parse_result(0, trailing, false)
+    }
+}
+
+// Decimal rendering uses bounded subtraction so it does not depend on a
+// division opcode in the Yggdrasil ISA.
+fn repl_decimal_digit(value: Int, power: Int, digit: Int) -> ReplDigit {
+    if value >= power {
+        repl_decimal_digit(value - power, power, digit + 1)
+    } else {
+        ReplDigit { digit: digit, remainder: value }
+    }
+}
+
+fn repl_next_decimal_power(power: Int) -> Int {
+    match power {
+        1000000000000000000 => 100000000000000000,
+        100000000000000000 => 10000000000000000,
+        10000000000000000 => 1000000000000000,
+        1000000000000000 => 100000000000000,
+        100000000000000 => 10000000000000,
+        10000000000000 => 1000000000000,
+        1000000000000 => 100000000000,
+        100000000000 => 10000000000,
+        10000000000 => 1000000000,
+        1000000000 => 100000000,
+        100000000 => 10000000,
+        10000000 => 1000000,
+        1000000 => 100000,
+        100000 => 10000,
+        10000 => 1000,
+        1000 => 100,
+        100 => 10,
+        10 => 1,
+        _ => 0
+    }
+}
+
+fn repl_decimal_bytes(value: Int, power: Int, started: Bool) -> [Int] {
+    if power == 0 {
+        []
+    } else {
+        let part = repl_decimal_digit(value, power, 0)
+        let next_power = repl_next_decimal_power(power)
+        if started || part.digit != 0 || power == 1 {
+            [48 + part.digit | repl_decimal_bytes(part.remainder, next_power, true)]
+        } else {
+            repl_decimal_bytes(part.remainder, next_power, false)
+        }
+    }
+}
+
+fn repl_integer_bytes(value: Int) -> [Int] {
+    if value < 0 {
+        [45 | repl_decimal_bytes(0 - value, 1000000000000000000, false)]
+    } else {
+        repl_decimal_bytes(value, 1000000000000000000, false)
+    }
+}
+
+fn repl_escape() -> String {
+    list_to_binary([27])
+}
+
+fn repl_prompt() -> String {
+    repl_escape() ++ "[1;36mlux>" ++ repl_escape() ++ "[0m "
+}
+
+fn repl_banner() -> String {
+    "\r\n" ++ repl_escape() ++ "[1;36mYggdrasil Lux TCP REPL" ++ repl_escape()
+        ++ "[0m\r\nType an integer expression, or `help`.\r\n\r\n" ++ repl_prompt()
+}
+
+fn repl_help() -> String {
+    "\r\nExpressions: signed integer literals, +, -, *, and parentheses\r\n"
+        ++ "Commands: help, about, colors, clear\r\n\r\n" ++ repl_prompt()
+}
+
+fn repl_about() -> String {
+    "\r\nThe evaluator and TCP state machine are Lux bytecode.\r\n"
+        ++ "Yggdrasil owns ethernet, ARP, and the virtio-net queues.\r\n\r\n"
+        ++ repl_prompt()
+}
+
+fn repl_colors_first() -> String {
+    "\r\n" ++ repl_escape() ++ "[31mred " ++ repl_escape() ++ "[32mgreen "
+        ++ repl_escape() ++ "[33myellow "
+}
+
+fn repl_colors_second() -> String {
+    repl_escape() ++ "[34mblue " ++ repl_escape() ++ "[35mmagenta "
+        ++ repl_escape() ++ "[36mcyan" ++ repl_escape() ++ "[0m\r\n\r\n"
+}
+
+fn repl_colors() -> String {
+    repl_colors_first() ++ repl_colors_second() ++ repl_prompt()
+}
+
+fn repl_value(value: Int) -> String {
+    "\r\n" ++ repl_escape() ++ "[1;32m= "
+        ++ list_to_binary(repl_integer_bytes(value))
+        ++ repl_escape() ++ "[0m\r\n\r\n" ++ repl_prompt()
+}
+
+fn repl_error() -> String {
+    "\r\n" ++ repl_escape() ++ "[1;31mparse error" ++ repl_escape()
+        ++ "[0m (try `help`)\r\n\r\n" ++ repl_prompt()
+}
+
+fn repl_eval(line: String) -> String {
+    if line == "" {
+        "\r\n" ++ repl_prompt()
+    } else if line == "help" {
+        repl_help()
+    } else if line == "about" {
+        repl_about()
+    } else if line == "colors" {
+        repl_colors()
+    } else if line == "clear" {
+        repl_escape() ++ "[2J" ++ repl_escape() ++ "[H" ++ repl_prompt()
+    } else {
+        let parsed = repl_parse_complete(line)
+        if parsed.ok { repl_value(parsed.value) } else { repl_error() }
+    }
+}
+
+// Pure smoke tests run under the examples suite. The network adapter invokes
+// repl_banner/0 and repl_eval/1 by their content-addressed aliases.
+fn repl_parser_smoke() -> Bool {
+    repl_precedence_smoke() && repl_grouped_smoke()
+        && repl_unary_smoke() && repl_subtraction_smoke() && repl_invalid_smoke()
+}
+
+fn repl_precedence_smoke() -> Bool {
+    let parsed = repl_parse_complete("2 + 3 * 4")
+    parsed.ok && parsed.value == 14
+}
+
+fn repl_grouped_smoke() -> Bool {
+    let parsed = repl_parse_complete("(2 + 3) * -4")
+    parsed.ok && parsed.value == -20
+}
+
+fn repl_unary_smoke() -> Bool {
+    let parsed = repl_parse_complete("-4")
+    parsed.ok && parsed.value == -4
+}
+
+fn repl_subtraction_smoke() -> Bool {
+    let parsed = repl_parse_complete("5 - 9")
+    parsed.ok && parsed.value == -4
+}
+
+fn repl_invalid_smoke() -> Bool {
+    let parsed = repl_parse_complete("2 +")
+    !parsed.ok
+}
+
+fn repl_decimal_smoke() -> Bool {
+    list_to_binary(repl_integer_bytes(0)) == "0"
+        && list_to_binary(repl_integer_bytes(123456789)) == "123456789"
+        && list_to_binary(repl_integer_bytes(-42)) == "-42"
+}
+
+fn repl_eval_smoke() -> Bool {
+    byte_size(repl_eval("2 + 3 * 4")) > 10
+        && byte_size(repl_eval("help")) > 10
+        && byte_size(repl_eval("2 +")) > 10
+}
+
+fn main() -> Bool {
+    repl_parser_smoke() && repl_decimal_smoke() && repl_eval_smoke()
+}

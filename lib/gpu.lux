@@ -1,0 +1,148 @@
+// Reusable virtio-gpu 2D transport for Lux/Yggdrasil.
+//
+// The kernel port is opaque: these helpers encode control headers, attach
+// pinned backing buffers, and present a scanout. 3D/virgl commands live in
+// `virgl.lux` and reuse the same submit path.
+mod gpu
+
+extern {
+    fn ygg::port_submit(Int, Int, Int, Int, Int) -> Int
+    fn ygg::buf_to_bin(Int) -> String
+    fn ygg::bin_to_buf(String) -> Int
+}
+
+fn gpu_le32(value: Int) -> [Int] {
+    [band(value, 255), band(bsr(value, 8), 255), band(bsr(value, 16), 255), band(bsr(value, 24), 255)]
+}
+
+fn gpu_zeros(count: Int) -> [Int] {
+    if count == 0 { [] } else { [0] ++ gpu_zeros(count - 1) }
+}
+
+fn gpu_header_ctx(command_type: Int, ctx_id: Int) -> [Int] {
+    gpu_le32(command_type) ++ gpu_le32(0) ++ gpu_zeros(8) ++ gpu_le32(ctx_id) ++ gpu_zeros(4)
+}
+
+fn gpu_header(command_type: Int) -> [Int] {
+    gpu_header_ctx(command_type, 0)
+}
+
+fn gpu_rect(x: Int, y: Int, width: Int, height: Int) -> [Int] {
+    gpu_le32(x) ++ gpu_le32(y) ++ gpu_le32(width) ++ gpu_le32(height)
+}
+
+fn gpu_byte_at(bytes: [Int], index: Int) -> Int {
+    if index == 0 { hd(bytes) } else { gpu_byte_at(tl(bytes), index - 1) }
+}
+
+fn gpu_le32_at(bytes: [Int], index: Int) -> Int {
+    gpu_byte_at(bytes, index)
+        + bsl(gpu_byte_at(bytes, index + 1), 8)
+        + bsl(gpu_byte_at(bytes, index + 2), 16)
+        + bsl(gpu_byte_at(bytes, index + 3), 24)
+}
+
+fn gpu_le32_bytes(b0: Int, b1: Int, b2: Int, b3: Int) -> Int {
+    b0 + bsl(b1, 8) + bsl(b2, 16) + bsl(b3, 24)
+}
+
+fn gpu_le32_bin(bytes: String, index: Int) -> Int {
+    gpu_le32_bytes(
+        binary_at(bytes, index),
+        binary_at(bytes, index + 1),
+        binary_at(bytes, index + 2),
+        binary_at(bytes, index + 3)
+    )
+}
+
+fn gpu_ctrl(port: Int, command: String, response_capacity: Int) -> String {
+    let command_buffer = ygg::bin_to_buf(command)
+    let _submitted = ygg::port_submit(port, 1, command_buffer, response_capacity, 101)
+    receive {
+        (:port_reply, _port, _tag, result) => ygg::buf_to_bin(result)
+    }
+}
+
+fn gpu_ctrl_attach(port: Int, prefix: String, backing: Int) -> String {
+    let prefix_buffer = ygg::bin_to_buf(prefix)
+    let _submitted = ygg::port_submit(port, 2, prefix_buffer, backing, 102)
+    receive {
+        (:port_reply, _port, _tag, result) => ygg::buf_to_bin(result)
+    }
+}
+
+fn gpu_ok_nodata() -> Int { 4352 }
+fn gpu_ok_display_info() -> Int { 4353 }
+fn gpu_format_b8g8r8x8() -> Int { 2 }
+fn gpu_kind() -> Int { 3 }
+
+fn gpu_ok(response: String) -> Bool {
+    gpu_le32_bin(response, 0) == gpu_ok_nodata()
+}
+
+fn gpu_get_display_info(port: Int) -> String {
+    gpu_ctrl(port, list_to_binary(gpu_header(256)), 408)
+}
+
+fn gpu_has_display(response: String) -> Bool {
+    gpu_le32_bin(response, 0) == gpu_ok_display_info()
+}
+
+fn gpu_scanout_enabled(response: String) -> Bool {
+    // virtio-gpu-gl often reports scanout 0 as disabled until SET_SCANOUT.
+    // A valid GET_DISPLAY_INFO response is enough to proceed.
+    gpu_has_display(response)
+}
+
+fn gpu_create_2d(port: Int, resource_id: Int, format: Int, width: Int, height: Int) -> Bool {
+    let command = list_to_binary(gpu_header(257) ++ gpu_le32(resource_id) ++ gpu_le32(format) ++ gpu_le32(width) ++ gpu_le32(height))
+    gpu_ok(gpu_ctrl(port, command, 24))
+}
+
+fn gpu_attach_backing(port: Int, resource_id: Int, backing: Int) -> Bool {
+    let prefix = list_to_binary(gpu_header(262) ++ gpu_le32(resource_id) ++ gpu_le32(1))
+    gpu_ok(gpu_ctrl_attach(port, prefix, backing))
+}
+
+fn gpu_set_scanout(port: Int, scanout: Int, resource_id: Int, width: Int, height: Int) -> Bool {
+    let command = list_to_binary(gpu_header(259) ++ gpu_rect(0, 0, width, height) ++ gpu_le32(scanout) ++ gpu_le32(resource_id))
+    gpu_ok(gpu_ctrl(port, command, 24))
+}
+
+fn gpu_transfer_rect(port: Int, resource_id: Int, x: Int, y: Int, width: Int, height: Int, stride: Int) -> Bool {
+    let offset = (y * stride + x) * 4
+    let command = list_to_binary(gpu_header(261) ++ gpu_rect(x, y, width, height) ++ gpu_le32(offset) ++ gpu_le32(0) ++ gpu_le32(resource_id) ++ gpu_le32(0))
+    gpu_ok(gpu_ctrl(port, command, 24))
+}
+
+fn gpu_flush_rect(port: Int, resource_id: Int, x: Int, y: Int, width: Int, height: Int) -> Bool {
+    let command = list_to_binary(gpu_header(260) ++ gpu_rect(x, y, width, height) ++ gpu_le32(resource_id) ++ gpu_le32(0))
+    gpu_ok(gpu_ctrl(port, command, 24))
+}
+
+fn gpu_present_rect(port: Int, resource_id: Int, x: Int, y: Int, width: Int, height: Int, stride: Int) -> Bool {
+    gpu_transfer_rect(port, resource_id, x, y, width, height, stride) && gpu_flush_rect(port, resource_id, x, y, width, height)
+}
+
+fn gpu_transfer_2d(port: Int, resource_id: Int, width: Int, height: Int) -> Bool {
+    gpu_transfer_rect(port, resource_id, 0, 0, width, height, width)
+}
+
+fn gpu_flush(port: Int, resource_id: Int, width: Int, height: Int) -> Bool {
+    gpu_flush_rect(port, resource_id, 0, 0, width, height)
+}
+
+fn gpu_present(port: Int, resource_id: Int, width: Int, height: Int) -> Bool {
+    gpu_present_rect(port, resource_id, 0, 0, width, height, width)
+}
+
+fn gpu_self_test() -> Bool {
+    byte_size(list_to_binary(gpu_header(256))) == 24
+        && byte_size(list_to_binary(gpu_rect(0, 0, 320, 200))) == 16
+        && gpu_le32_at([65, 66, 67, 68], 0) == 1145258561
+        && gpu_ok_nodata() == 4352
+}
+
+fn main() -> Bool {
+    gpu_self_test()
+}

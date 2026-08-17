@@ -809,6 +809,12 @@ impl Session {
         );
         register_builtin(
             env,
+            "binary_at",
+            vec![string.clone(), int.clone()],
+            int.clone(),
+        );
+        register_builtin(
+            env,
             "binary_to_list",
             vec![string.clone()],
             Type::List(Box::new(int.clone())),

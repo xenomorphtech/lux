@@ -550,8 +550,12 @@ impl<'a> FunctionCompiler<'a> {
                 (
                     CoreExpr::Lit(CoreLit::Int(value)),
                     CoreBinaryKind::Integer,
-                    CoreBinarySize::Bits(8),
-                ) if (0..=255).contains(value) => bytes.push(*value as u8),
+                    CoreBinarySize::Bits(bits),
+                ) if matches!(bits, 8 | 16 | 32 | 64) && *value >= 0 => {
+                    let width = (*bits / 8) as usize;
+                    let raw = *value as u64;
+                    bytes.extend_from_slice(&raw.to_le_bytes()[..width]);
+                }
                 (CoreExpr::Binary(inner), CoreBinaryKind::Binary, _) => {
                     bytes.extend_from_slice(&Self::constant_binary_bytes(inner)?);
                 }
@@ -574,6 +578,14 @@ impl<'a> FunctionCompiler<'a> {
         }
         if module == "erlang" {
             return self.compile_erlang_call(name, arguments, variables);
+        }
+        if module == "binary" && name == "at" && arguments.len() == 2 {
+            // Allocation-free byte indexing (the `binary_at` builtin).
+            let binary = self.compile_expr(&arguments[0], variables, false)?;
+            let index = self.compile_expr(&arguments[1], variables, false)?;
+            let destination = self.allocate_register()?;
+            self.code.u8(op::BIN_AT).u8(destination).u8(binary).u8(index);
+            return Ok(destination);
         }
         if module == "io" && name == "format" {
             return self.compile_io_format(arguments, variables);
@@ -701,6 +713,11 @@ impl<'a> FunctionCompiler<'a> {
                 let data = self.compile_expr(data, variables, false)?;
                 let destination = self.allocate_register()?;
                 self.code.u8(op::BUF_WRITE).u8(destination).u8(buffer).u8(offset).u8(data);
+                Ok(destination)
+            }
+            ("ticks", []) => {
+                let destination = self.allocate_register()?;
+                self.code.u8(op::TICKS).u8(destination);
                 Ok(destination)
             }
             _ => self.unsupported(&format!("ygg::{name}/{}", arguments.len())),

@@ -1,0 +1,8 @@
+// Host-side smoke test for the reusable virtio-gpu transport library.
+mod gpu_example
+
+use gpu
+
+fn main() -> Bool {
+    gpu_self_test()
+}

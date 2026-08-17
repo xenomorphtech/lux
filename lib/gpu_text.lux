@@ -1,0 +1,305 @@
+// Alacritty-style GPU text compositor for virtio-gpu / virgl.
+//
+// The CPU keeps the cell store and emits dirty quads. Coverage lives in one
+// atlas texture; virgl mixes fg/bg in the fragment shader. The guest never
+// composites a framebuffer.
+mod gpu_text
+
+use font
+use virgl
+use gpu_text_tables
+
+extern {
+    fn ygg::buf_write(Int, Int, String) -> Int
+    fn ygg::buf_read(Int, Int, Int) -> String
+}
+
+fn gpu_text_ctx() -> Int { 1 }
+fn gpu_text_color_res() -> Int { 8 }
+fn gpu_text_atlas_res() -> Int { 9 }
+fn gpu_text_vbo_res() -> Int { 10 }
+fn gpu_text_surface() -> Int { 1 }
+fn gpu_text_blend() -> Int { 2 }
+fn gpu_text_rast() -> Int { 3 }
+fn gpu_text_dsa() -> Int { 4 }
+fn gpu_text_vs() -> Int { 5 }
+fn gpu_text_fs() -> Int { 6 }
+fn gpu_text_ve() -> Int { 7 }
+fn gpu_text_samp() -> Int { 8 }
+fn gpu_text_view() -> Int { 9 }
+fn gpu_text_stride() -> Int { 32 }
+fn gpu_text_f32_one() -> Int { 1065353216 }
+
+fn gpu_text_table_u32(table: String, index: Int) -> Int {
+    gpu_le32_bin(table, index * 4)
+}
+
+fn gpu_text_ndc_x(col: Int) -> Int {
+    gpu_text_table_u32(gpu_ndc_x_table(), col)
+}
+
+fn gpu_text_ndc_y(row: Int) -> Int {
+    gpu_text_table_u32(gpu_ndc_y_table(), row)
+}
+
+fn gpu_text_u(slot: Int) -> Int {
+    gpu_text_table_u32(gpu_u_table(), slot)
+}
+
+fn gpu_text_color_channel(color: Int, channel: Int) -> Int {
+    gpu_text_table_u32(gpu_color_table(), color * 4 + channel)
+}
+
+fn gpu_text_vs_src() -> String {
+    "VERT\nDCL IN[0]\nDCL IN[1]\nDCL OUT[0], POSITION\nDCL OUT[1], COLOR\n  0: MOV OUT[1], IN[1]\n  1: MOV OUT[0], IN[0]\n  2: END\n"
+}
+
+fn gpu_text_fs_src() -> String {
+    "FRAG\nDCL IN[0], COLOR, LINEAR\nDCL OUT[0], COLOR\n  0: MOV OUT[0], IN[0]\n  1: END\n"
+}
+
+fn gpu_text_vert(nx: Int, ny: Int, color: Int) -> String {
+    let one = gpu_text_f32_one()
+    virgl_words([
+        nx, ny, 0, one,
+        gpu_text_color_channel(color, 0),
+        gpu_text_color_channel(color, 1),
+        gpu_text_color_channel(color, 2),
+        one
+    ])
+}
+
+fn gpu_text_quad(col: Int, row: Int, glyph: Int, fg: Int, bg: Int) -> String {
+    let x0 = gpu_text_ndc_x(col)
+    let x1 = gpu_text_ndc_x(col + 1)
+    let y0 = gpu_text_ndc_y(row)
+    let y1 = gpu_text_ndc_y(row + 1)
+    let color = if glyph == 0 { bg } else { fg }
+    gpu_text_vert(x0, y0, color)
+        ++ gpu_text_vert(x1, y0, color)
+        ++ gpu_text_vert(x1, y1, color)
+        ++ gpu_text_vert(x0, y0, color)
+        ++ gpu_text_vert(x1, y1, color)
+        ++ gpu_text_vert(x0, y1, color)
+}
+
+fn gpu_text_vbo_bytes() -> Int { 384000 }
+
+fn gpu_text_create_color(port: Int, width: Int, height: Int, backing: Int) -> Bool {
+    gpu_ok(gpu_ctrl(
+        port,
+        virgl_cmd_resource_create_3d(
+            gpu_text_ctx(),
+            gpu_text_color_res(),
+            virgl_target_texture_2d(),
+            virgl_format_b8g8r8x8(),
+            virgl_bind_scanout(),
+            width,
+            height,
+            1,
+            1,
+            0,
+            0,
+            1
+        ),
+        24
+    ))
+        && gpu_attach_backing(port, gpu_text_color_res(), backing)
+        && gpu_ok(gpu_ctrl(port, virgl_cmd_ctx_attach(gpu_text_ctx(), gpu_text_color_res()), 24))
+}
+
+fn gpu_text_download(port: Int, width: Int, height: Int) -> Bool {
+    gpu_ok(gpu_ctrl(
+        port,
+        virgl_cmd_transfer_from_host_3d(gpu_text_ctx(), gpu_text_color_res(), 0, 0, 0, width, height, 1, 0, 0, width * 4, 0),
+        24
+    ))
+}
+
+fn gpu_text_create_atlas(port: Int, backing: Int) -> Bool {
+    gpu_ok(gpu_ctrl(
+        port,
+        virgl_cmd_resource_create_3d(
+            gpu_text_ctx(),
+            gpu_text_atlas_res(),
+            virgl_target_texture_2d(),
+            virgl_format_b8g8r8a8(),
+            virgl_bind_sampler(),
+            font_atlas_2d_width(),
+            font_atlas_2d_height(),
+            1,
+            1,
+            0,
+            0,
+            0
+        ),
+        24
+    ))
+        && gpu_attach_backing(port, gpu_text_atlas_res(), backing)
+        && gpu_ok(gpu_ctrl(port, virgl_cmd_ctx_attach(gpu_text_ctx(), gpu_text_atlas_res()), 24))
+        && virgl_submit(
+            port,
+            gpu_text_ctx(),
+            virgl_ccw_inline_write_2d(
+                gpu_text_atlas_res(),
+                font_atlas_2d_width(),
+                font_atlas_2d_height(),
+                font_atlas_2d_width() * 4,
+                font_atlas_2d()
+            )
+        )
+}
+
+fn gpu_text_create_vbo(port: Int, backing: Int) -> Bool {
+    gpu_ok(gpu_ctrl(
+        port,
+        virgl_cmd_resource_create_3d(
+            gpu_text_ctx(),
+            gpu_text_vbo_res(),
+            virgl_target_buffer(),
+            virgl_format_r8(),
+            virgl_bind_vertex(),
+            gpu_text_vbo_bytes(),
+            1,
+            1,
+            1,
+            0,
+            0,
+            0
+        ),
+        24
+    ))
+        && gpu_attach_backing(port, gpu_text_vbo_res(), backing)
+        && gpu_ok(gpu_ctrl(port, virgl_cmd_ctx_attach(gpu_text_ctx(), gpu_text_vbo_res()), 24))
+}
+
+fn gpu_text_objects() -> String {
+    virgl_ccw_create_sub_ctx(0)
+        ++ virgl_ccw_set_sub_ctx(0)
+        ++ virgl_ccw_create_blend(gpu_text_blend())
+        ++ virgl_ccw_create_dsa(gpu_text_dsa())
+        ++ virgl_ccw_create_rasterizer(gpu_text_rast())
+        ++ virgl_ccw_create_surface(gpu_text_surface(), gpu_text_color_res(), virgl_format_b8g8r8x8())
+}
+
+fn gpu_text_shaders() -> String {
+    virgl_ccw_create_ve(gpu_text_ve())
+        ++ virgl_ccw_create_sampler_state(gpu_text_samp())
+        ++ virgl_ccw_create_sampler_view(gpu_text_view(), gpu_text_atlas_res(), virgl_format_b8g8r8a8())
+        ++ virgl_ccw_create_shader(gpu_text_vs(), 0, gpu_text_vs_src())
+        ++ virgl_ccw_create_shader(gpu_text_fs(), 1, gpu_text_fs_src())
+}
+
+fn gpu_text_binds() -> String {
+    let half_w = 1130102784
+    let half_h = 1134764032
+    virgl_ccw_bind(1, gpu_text_blend())
+        ++ virgl_ccw_bind(2, gpu_text_rast())
+        ++ virgl_ccw_bind(3, gpu_text_dsa())
+        ++ virgl_ccw_bind(5, gpu_text_ve())
+        ++ virgl_ccw_bind_shader(gpu_text_vs(), 0)
+        ++ virgl_ccw_bind_shader(gpu_text_fs(), 1)
+        ++ virgl_ccw_set_framebuffer(gpu_text_surface())
+        ++ virgl_ccw_set_viewport(half_w, half_h, half_w, half_h)
+        ++ virgl_ccw_set_vertex_buffers(gpu_text_stride(), 0, gpu_text_vbo_res())
+        ++ virgl_ccw_bind_sampler_states(1, gpu_text_samp())
+        ++ virgl_ccw_set_sampler_views(1, gpu_text_view())
+        ++ virgl_ccw_clear(4, 0, 0, 0, gpu_text_f32_one())
+}
+
+fn gpu_text_pipeline(port: Int, width: Int, height: Int) -> Bool {
+    if width == 480 && height == 650 {
+        virgl_submit(port, gpu_text_ctx(), gpu_text_objects() ++ gpu_text_shaders() ++ gpu_text_binds())
+    } else {
+        false
+    }
+}
+
+fn gpu_text_open_ctx(port: Int) -> Bool {
+    let info = gpu_ctrl(port, virgl_cmd_get_capset_info(0), 40)
+    if gpu_le32_bin(info, 0) != virgl_ok_capset_info() {
+        false
+    } else {
+        gpu_ok(gpu_ctrl(port, virgl_cmd_ctx_create(gpu_text_ctx(), virgl_capset_id(info), "lux"), 24))
+    }
+}
+
+fn gpu_text_scanout_res() -> Int { 7 }
+
+fn gpu_text_scanout(port: Int, width: Int, height: Int, backing: Int) -> Bool {
+    gpu_create_2d(port, gpu_text_scanout_res(), gpu_format_b8g8r8x8(), width, height)
+        && gpu_attach_backing(port, gpu_text_scanout_res(), backing)
+        && gpu_set_scanout(port, 0, gpu_text_scanout_res(), width, height)
+}
+
+fn gpu_text_flush(port: Int, width: Int, height: Int) -> Bool {
+    gpu_flush_rect(port, gpu_text_color_res(), 0, 0, width, height)
+}
+
+// Pull a rectangle from the 3D colorbuf into the shared backing, then push
+// it through the 2D scanout. gtk,gl=on does not show virgl textures; this
+// is what the GTK window actually displays.
+fn gpu_text_show(port: Int, x: Int, y: Int, width: Int, height: Int, stride: Int) -> Bool {
+    let offset = (y * stride + x) * 4
+    gpu_ok(gpu_ctrl(
+        port,
+        virgl_cmd_transfer_from_host_3d(
+            gpu_text_ctx(),
+            gpu_text_color_res(),
+            x,
+            y,
+            0,
+            width,
+            height,
+            1,
+            offset,
+            0,
+            stride * 4,
+            0
+        ),
+        24
+    )) && gpu_present_rect(port, gpu_text_scanout_res(), x, y, width, height, stride)
+        && gpu_flush_rect(port, gpu_text_color_res(), x, y, width, height)
+}
+
+fn gpu_text_upload_cells(port: Int, vbo: Int, bytes: Int) -> Bool {
+    if bytes == 0 {
+        true
+    } else {
+        let data = ygg::buf_read(vbo, 0, bytes)
+        virgl_submit(port, gpu_text_ctx(), virgl_ccw_inline_write(gpu_text_vbo_res(), 0, data))
+    }
+}
+
+fn gpu_text_draw(port: Int, vertices: Int) -> Bool {
+    if vertices == 0 {
+        true
+    } else {
+        virgl_submit(port, gpu_text_ctx(), virgl_ccw_draw_vbo(0, vertices))
+    }
+}
+
+fn gpu_text_emit_cell(vbo: Int, offset: Int, col: Int, row: Int, character: Int, fg: Int, bg: Int) -> Int {
+    let _written = ygg::buf_write(vbo, offset, gpu_text_quad(col, row, font_glyph_index(character), fg, bg))
+    offset + 192
+}
+
+fn gpu_text_self_test_atlas() -> Bool {
+    byte_size(font_atlas_2d()) == font_atlas_2d_width() * font_atlas_2d_height() * 4
+        && font_atlas_2d_width() == 1152
+        && font_atlas_2d_height() == 26
+}
+
+fn gpu_text_self_test_quads() -> Bool {
+    byte_size(gpu_text_quad(0, 0, 33, 7, 0)) == 192
+        && gpu_text_ndc_x(0) == 3212836864
+        && gpu_text_color_channel(15, 0) == gpu_text_f32_one()
+}
+
+fn gpu_text_self_test() -> Bool {
+    virgl_self_test() && font_self_test() && gpu_text_self_test_atlas() && gpu_text_self_test_quads()
+}
+
+fn main() -> Bool {
+    gpu_text_self_test()
+}
