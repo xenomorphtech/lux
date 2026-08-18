@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+#[allow(unused_imports)]
+use crate::prelude::*;
+use crate::collections::HashMap;
 
 use crate::syntax::ast::*;
 use crate::syntax::span::Span;
@@ -1250,8 +1252,8 @@ impl InferenceContext {
                     return Ok(());
                 }
 
-                let mut seen = std::collections::HashSet::new();
-                let all_variants: std::collections::HashSet<String> = type_def
+                let mut seen = crate::collections::HashSet::new();
+                let all_variants: crate::collections::HashSet<String> = type_def
                     .variants
                     .iter()
                     .map(|(variant, _)| format!("{type_name}::{variant}"))
@@ -1316,8 +1318,8 @@ impl InferenceContext {
                     return Ok(());
                 }
 
-                let mut seen = std::collections::HashSet::new();
-                let all_variants: std::collections::HashSet<String> = type_def
+                let mut seen = crate::collections::HashSet::new();
+                let all_variants: crate::collections::HashSet<String> = type_def
                     .variants
                     .iter()
                     .map(|(variant, _)| format!("{type_name}::{variant}"))
@@ -1327,7 +1329,7 @@ impl InferenceContext {
                     if matches!(guard_truth, GuardTruth::AlwaysFalse) {
                         return Err(TypeError::RedundantMatchArm(arm.span));
                     }
-                    let mut arm_coverage = std::collections::HashSet::new();
+                    let mut arm_coverage = crate::collections::HashSet::new();
                     if pattern_is_catch_all(&arm.pattern) {
                         arm_coverage = all_variants.clone();
                     } else {
@@ -1450,7 +1452,7 @@ fn bool_pattern_coverage(pattern: &Pattern) -> (bool, bool) {
 fn enum_pattern_coverage(
     pattern: &Pattern,
     type_name: &str,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut crate::collections::HashSet<String>,
 ) {
     match pattern {
         Pattern::Constructor(path, _, _) => {

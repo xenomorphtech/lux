@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 /// Core Erlang AST representation
 
 #[derive(Debug, Clone)]

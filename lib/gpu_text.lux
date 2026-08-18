@@ -215,6 +215,20 @@ fn gpu_text_pipeline(port: Int, width: Int, height: Int) -> Bool {
     }
 }
 
+// Best-effort teardown of everything this compositor creates on the device,
+// so a restarted terminal can re-run setup with the same fixed ids. The ctx
+// goes first (destroying it detaches its resources), then each resource is
+// unref'd. Every reply is ignored: on first boot none of these exist yet and
+// the device answers with harmless errors.
+fn gpu_text_teardown(port: Int) -> Bool {
+    let _ctx = gpu_ctrl(port, virgl_cmd_ctx_destroy(gpu_text_ctx()), 24)
+    let _vbo = gpu_ctrl(port, virgl_cmd_resource_unref(gpu_text_vbo_res()), 24)
+    let _atlas = gpu_ctrl(port, virgl_cmd_resource_unref(gpu_text_atlas_res()), 24)
+    let _color = gpu_ctrl(port, virgl_cmd_resource_unref(gpu_text_color_res()), 24)
+    let _scan = gpu_ctrl(port, virgl_cmd_resource_unref(gpu_text_scanout_res()), 24)
+    true
+}
+
 fn gpu_text_open_ctx(port: Int) -> Bool {
     let info = gpu_ctrl(port, virgl_cmd_get_capset_info(0), 40)
     if gpu_le32_bin(info, 0) != virgl_ok_capset_info() {

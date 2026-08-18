@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use lux_frontend::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{

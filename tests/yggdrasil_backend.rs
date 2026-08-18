@@ -10,11 +10,91 @@ use ygg_bytecode::Module;
 use ygg_interp::{SystemApi, Trap, run_function};
 use ygg_term::{Heap, Term};
 
+fn compile_source_modules(source: &str) -> (Vec<YggdrasilModule>, String) {
+    let mut session = Session::with_config(SessionConfig::trusted());
+    let syntax = session.compile_source(source).expect("type-check source");
+    let translated = Translator::new().translate_function_modules(&syntax);
+    let output = YggdrasilCompiler::compile(
+        &translated.modules,
+        translated.entry_module.as_deref(),
+        translated.entry_arity.unwrap_or(0),
+    )
+    .expect("compile to Yggdrasil");
+    let entry = output.entry_module.expect("source has an entry module");
+    (output.modules, entry)
+}
+
+fn run_entry(modules: &[YggdrasilModule], entry_name: &str) -> Term {
+    let entry = modules
+        .iter()
+        .find(|module| module.name == entry_name)
+        .expect("entry module is in output")
+        .module
+        .clone();
+    let entry_function = entry
+        .functions
+        .iter()
+        .position(|function| {
+            function.arity == 0
+                && entry
+                    .atoms
+                    .get(function.name_atom as usize)
+                    .is_some_and(|name| name == "apply")
+        })
+        .expect("entry apply/0");
+    let mut api = TestApi::new(modules, entry_name);
+    api.run_trampoline(entry_name.to_owned(), entry_function, Vec::new())
+        .expect("execute entry")
+}
+
+#[test]
+fn cons_patterns_fail_over_and_mixed_recursion_keeps_pending_work() {
+    // Two regressions from the in-OS REPL bring-up:
+    //  - `two_head([13])`: a multi-element list pattern against a shorter
+    //    list must fall through to the next clause, not trap on HEAD(nil).
+    //  - `drop13`: a function mixing a tail self-call with a non-tail
+    //    self-call must not lose the non-tail frames' pending work when the
+    //    tail sentinel unwinds (the `[b | ...]` prefix used to vanish).
+    let source = r#"mod patsem
+
+fn two_head(bytes: [Int]) -> Int {
+    match bytes {
+        [13, 10 | _rest] => 1,
+        [13 | _rest] => 2,
+        [_b | _rest] => 3,
+        [] => 4
+    }
+}
+
+fn drop13(bytes: [Int]) -> [Int] {
+    match bytes {
+        [] => [],
+        [13 | rest] => drop13(rest),
+        [b | rest] => [b | drop13(rest)]
+    }
+}
+
+fn sum(bytes: [Int], acc: Int) -> Int {
+    match bytes {
+        [] => acc,
+        [b | rest] => sum(rest, acc + b)
+    }
+}
+
+fn main() -> Int {
+    two_head([13]) * 100 + sum(drop13([1, 13, 2]), 0)
+}
+"#;
+    let (modules, entry_name) = compile_source_modules(source);
+    let result = run_entry(&modules, &entry_name);
+    assert_eq!(result.as_int(), Some(203));
+}
+
 fn compile_fib() -> (Vec<YggdrasilModule>, String) {
     let source =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fib.lux"))
             .expect("read fib example");
-    let mut session = Session::with_config(PathBuf::new(), SessionConfig::trusted());
+    let mut session = Session::with_config(SessionConfig::trusted());
     let syntax = session.compile_source(&source).expect("type-check fib");
     let translated = Translator::new().translate_function_modules(&syntax);
     let output = YggdrasilCompiler::compile(
@@ -314,7 +394,7 @@ fn main() -> Bool {
     <<0x44434241:32>> == "ABCD"
 }
 "#;
-    let mut session = Session::with_config(PathBuf::new(), SessionConfig::trusted());
+    let mut session = Session::with_config(SessionConfig::trusted());
     let syntax = session.compile_source(source).expect("type-check packed binary");
     let translated = Translator::new().translate_function_modules(&syntax);
     let output = YggdrasilCompiler::compile(

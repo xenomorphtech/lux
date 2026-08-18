@@ -1,0 +1,15 @@
+[package]
+name = "lux-frontend"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+hashbrown = "0.15"
+sha2 = { version = "0.10.9", default-features = false }
+ygg-bytecode = { path = "../../yggdrasil/crates/ygg-bytecode" }
+
+[dev-dependencies]

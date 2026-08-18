@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+#[allow(unused_imports)]
+use crate::prelude::*;
+use crate::collections::{HashMap, HashSet};
 
 use crate::syntax::ast::{Item, Module};
 use crate::syntax::lexer::Lexer;
@@ -65,8 +66,6 @@ impl SessionConfig {
 }
 
 pub struct Session {
-    pub source_files: Vec<PathBuf>,
-    pub output_dir: PathBuf,
     pub errors: Vec<CompileError>,
     pub config: SessionConfig,
 }
@@ -81,6 +80,7 @@ struct BuiltinTypeIds {
 pub enum CompileError {
     Parse(ParseError),
     Type(TypeError),
+    #[cfg(feature = "std")]
     Io(std::io::Error),
     Security(SecurityError),
 }
@@ -104,6 +104,7 @@ impl From<TypeError> for CompileError {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<std::io::Error> for CompileError {
     fn from(e: std::io::Error) -> Self {
         CompileError::Io(e)
@@ -117,21 +118,15 @@ impl From<SecurityError> for CompileError {
 }
 
 impl Session {
-    pub fn new(output_dir: PathBuf) -> Self {
-        Self::with_config(output_dir, SessionConfig::trusted())
+    pub fn new() -> Self {
+        Self::with_config(SessionConfig::trusted())
     }
 
-    pub fn with_config(output_dir: PathBuf, config: SessionConfig) -> Self {
+    pub fn with_config(config: SessionConfig) -> Self {
         Session {
-            source_files: Vec::new(),
-            output_dir,
             errors: Vec::new(),
             config,
         }
-    }
-
-    pub fn add_file(&mut self, path: PathBuf) {
-        self.source_files.push(path);
     }
 
     pub fn compile_source(&mut self, source: &str) -> Result<Module, CompileError> {
@@ -1358,7 +1353,7 @@ mod tests {
             fn main() { 1 }
         "#;
 
-        let mut session = Session::with_config(PathBuf::new(), SessionConfig::sandboxed_default());
+        let mut session = Session::with_config(SessionConfig::sandboxed_default());
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1380,7 +1375,7 @@ mod tests {
         "#;
 
         let mut session =
-            Session::with_config(PathBuf::new(), SessionConfig::capability_sandboxed());
+            Session::with_config(SessionConfig::capability_sandboxed());
         session.compile_source(source).unwrap();
     }
 
@@ -1395,7 +1390,7 @@ mod tests {
         "#;
 
         let mut session =
-            Session::with_config(PathBuf::new(), SessionConfig::capability_sandboxed());
+            Session::with_config(SessionConfig::capability_sandboxed());
         let err = session.compile_source(source).unwrap_err();
         match err {
             CompileError::Security(SecurityError::ExternModuleDisallowed { module, .. }) => {
@@ -1412,7 +1407,7 @@ mod tests {
             fn main() { 1 }
         "#;
 
-        let mut session = Session::with_config(PathBuf::new(), SessionConfig::sandboxed_default());
+        let mut session = Session::with_config(SessionConfig::sandboxed_default());
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1429,7 +1424,7 @@ mod tests {
             fn main() { whereis("host") }
         "#;
 
-        let mut session = Session::with_config(PathBuf::new(), SessionConfig::sandboxed_default());
+        let mut session = Session::with_config(SessionConfig::sandboxed_default());
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1448,7 +1443,7 @@ mod tests {
             fn main() -> Int { foo() + foo(2) }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let error = session.compile_source(source).unwrap_err();
         assert!(matches!(
             error,
@@ -1473,7 +1468,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1501,7 +1496,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1514,7 +1509,7 @@ mod tests {
             fn main() -> UserId { id(1) }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1528,7 +1523,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1542,7 +1537,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1568,7 +1563,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1595,7 +1590,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1610,7 +1605,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1626,7 +1621,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1647,7 +1642,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1673,7 +1668,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1693,7 +1688,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1717,7 +1712,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1740,7 +1735,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         match err {
@@ -1765,7 +1760,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1775,7 +1770,7 @@ mod tests {
             fn bad() -> Float { 1 }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let err = session.compile_source(source).unwrap_err();
 
         let rendered = match err {
@@ -1799,7 +1794,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1814,7 +1809,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1826,7 +1821,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1843,13 +1838,13 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
     #[test]
     fn builtin_names_are_not_overloaded_by_arity() {
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         let error = session
             .compile_source("fn main() -> Int { random(100) }")
             .unwrap_err();
@@ -1879,7 +1874,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1891,7 +1886,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1909,7 +1904,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1930,7 +1925,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1957,7 +1952,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -1988,7 +1983,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 
@@ -2009,7 +2004,7 @@ mod tests {
             }
         "#;
 
-        let mut session = Session::new(PathBuf::new());
+        let mut session = Session::new();
         session.compile_source(source).unwrap();
     }
 }

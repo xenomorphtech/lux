@@ -6,8 +6,10 @@
 //! instructions. This lets Yggdrasil's module table retain responsibility for
 //! hot-code lookup while its verifier remains the execution safety boundary.
 
-use std::collections::HashMap;
-use std::fmt;
+#[allow(unused_imports)]
+use crate::prelude::*;
+use crate::collections::HashMap;
+use core::fmt;
 
 use ygg_bytecode::verify::{self, VerifyError};
 use ygg_bytecode::{CodeBuilder, Function, Module, op};
@@ -146,7 +148,7 @@ impl fmt::Display for YggdrasilError {
     }
 }
 
-impl std::error::Error for YggdrasilError {}
+impl core::error::Error for YggdrasilError {}
 
 /// Compiles Lux's Core Erlang IR to Yggdrasil's verified register bytecode.
 pub struct YggdrasilCompiler;
@@ -202,6 +204,68 @@ impl AtomTable {
     }
 }
 
+/// Does `expr`, in the given tail context, contain a *non-tail* self-call
+/// (which compiles to an internal `op::CALL`)? Mirrors `compile_expr`'s tail
+/// propagation exactly.
+///
+/// Why it matters: a tail call compiles to a stash + TAIL_SENTINEL return,
+/// and the engines' internal-CALL arms *propagate* the sentinel, unwinding
+/// the caller's frame and abandoning its pending work (the cons an
+/// `[x | recurse(rest)]` was about to build, the concat after a recursive
+/// call, ...). External call sites are always contained — the dynamic path
+/// runs the trampoline loop and bound callers resume inline — so the only
+/// hazardous mix is internal: a module with both a non-tail self-call and a
+/// tail call. Such modules get their tail calls demoted to plain contained
+/// calls (`demote_tails`): native stack grows with data size there, but the
+/// results stop being silently wrong.
+fn has_nontail_self_call(module_name: &str, expr: &CoreExpr, in_tail: bool) -> bool {
+    let has = |e: &CoreExpr, tail: bool| has_nontail_self_call(module_name, e, tail);
+    let any = |es: &[CoreExpr]| es.iter().any(|e| has(e, false));
+    let clauses_have = |clauses: &[CoreClause], tail: bool| {
+        clauses
+            .iter()
+            .any(|c| has(&c.guard, false) || has(&c.body, tail))
+    };
+    match expr {
+        CoreExpr::Lit(_)
+        | CoreExpr::Var(_)
+        | CoreExpr::LocalFunRef(_, _)
+        | CoreExpr::RemoteFunRef(_, _, _) => false,
+        CoreExpr::Tuple(es) | CoreExpr::Primop(_, es) => any(es),
+        CoreExpr::List(es, tail) => any(es) || has(tail, false),
+        CoreExpr::Cons(h, t) => has(h, false) || has(t, false),
+        CoreExpr::Map(entries) => entries.iter().any(|(k, v)| has(k, false) || has(v, false)),
+        CoreExpr::Binary(segments) => segments.iter().any(|s| has(&s.value, false)),
+        CoreExpr::Apply(callee, args) => {
+            let is_self = match callee.as_ref() {
+                CoreExpr::LocalFunRef(_, arity) => *arity == args.len(),
+                CoreExpr::RemoteFunRef(module, _, arity) => {
+                    *arity == args.len() && module == module_name
+                }
+                _ => false,
+            };
+            (is_self && !in_tail) || any(args)
+        }
+        CoreExpr::Call(module, _, args) => (module == module_name && !in_tail) || any(args),
+        CoreExpr::Let(bindings, body) => {
+            bindings.iter().any(|(_, v)| has(v, false)) || has(body, in_tail)
+        }
+        CoreExpr::Case(scrutinee, clauses) => {
+            has(scrutinee, false) || clauses_have(clauses, in_tail)
+        }
+        CoreExpr::Receive { clauses, timeout } => {
+            clauses_have(clauses, in_tail)
+                || timeout
+                    .as_ref()
+                    .is_some_and(|(ms, body)| has(ms, false) || has(body, in_tail))
+        }
+        CoreExpr::Fun(_, body) => has(body, false),
+        CoreExpr::Seq(first, second) => has(first, false) || has(second, in_tail),
+        // Unsupported by this backend anyway; be conservative.
+        CoreExpr::Try { .. } => true,
+    }
+}
+
 struct ModuleCompiler<'a> {
     core: &'a CoreModule,
     atoms: AtomTable,
@@ -235,11 +299,25 @@ impl<'a> ModuleCompiler<'a> {
             self.atoms.intern(&function.name);
         }
 
+        // See `has_nontail_self_call`: a unit mixing non-tail internal calls
+        // with tail calls would leak the tail sentinel through the internal
+        // frames, so its tail calls are demoted to contained calls.
+        let demote_tails = self
+            .core
+            .functions
+            .iter()
+            .any(|f| has_nontail_self_call(&self.core.name, &f.body, true));
+
         let mut functions = Vec::with_capacity(self.core.functions.len());
         for function in &self.core.functions {
             let name_atom = self.atoms.intern(&function.name);
-            let compiler =
-                FunctionCompiler::new(&self.core.name, function, &self.functions, &mut self.atoms)?;
+            let compiler = FunctionCompiler::new(
+                &self.core.name,
+                function,
+                &self.functions,
+                &mut self.atoms,
+                demote_tails,
+            )?;
             functions.push(compiler.compile(name_atom)?);
         }
 
@@ -259,6 +337,7 @@ struct FunctionCompiler<'a> {
     code: CodeBuilder,
     next_register: u16,
     next_label: u32,
+    demote_tails: bool,
 }
 
 impl<'a> FunctionCompiler<'a> {
@@ -267,6 +346,7 @@ impl<'a> FunctionCompiler<'a> {
         function: &'a CoreFunDef,
         functions: &'a HashMap<(String, usize), u32>,
         atoms: &'a mut AtomTable,
+        demote_tails: bool,
     ) -> Result<Self, YggdrasilError> {
         if function.params.len() > u8::MAX as usize || function.arity > u8::MAX as usize {
             return Err(YggdrasilError::TooManyArguments {
@@ -284,6 +364,7 @@ impl<'a> FunctionCompiler<'a> {
             code: CodeBuilder::new(),
             next_register: function.params.len() as u16,
             next_label: 0,
+            demote_tails,
         })
     }
 
@@ -296,7 +377,7 @@ impl<'a> FunctionCompiler<'a> {
         let result = self.compile_expr(&self.function.body, &variables, true)?;
         self.code.u8(op::RET).u8(result);
         let nregs = self.next_register as u8;
-        let code = std::mem::take(&mut self.code).finish().map_err(|label| {
+        let code = core::mem::take(&mut self.code).finish().map_err(|label| {
             YggdrasilError::MissingLabel {
                 module: self.module_name.to_owned(),
                 function: self.function_name.to_owned(),
@@ -599,7 +680,7 @@ impl<'a> FunctionCompiler<'a> {
 
         let argument_registers = self.compile_expressions(arguments, variables)?;
         let argument_count = self.argument_count(argument_registers.len())?;
-        if in_tail {
+        if in_tail && !self.demote_tails {
             // Tail position: hand the target to the engine trampoline —
             // constant native stack, GC-safe point per hop. This includes
             // self-recursion: the hashing pass canonicalizes self-references
@@ -934,6 +1015,46 @@ impl<'a> FunctionCompiler<'a> {
                 self.code.u8(op::EXIT_ATOM).u8(reason);
                 Ok(reason)
             }
+            // `spawn(|| f(x))` compiles by lifting the thunk: its body must be
+            // a direct call with at most one argument. The argument is
+            // evaluated here in the parent (it must be an immediate at
+            // runtime — pid, int, atom) and the callee is spawned *by name*
+            // through the module table (`SPAWN_EXT`), which is the only way
+            // to spawn a content-addressed function module.
+            ("spawn", [CoreExpr::Fun(params, body)]) if params.is_empty() => {
+                let CoreExpr::Call(module, fname, call_args) = &**body else {
+                    return self.unsupported("spawn of a non-call thunk");
+                };
+                if call_args.len() > 1 {
+                    return self.unsupported("spawn thunk with more than one argument");
+                }
+                let argument = match call_args.first() {
+                    Some(a) => self.compile_expr(a, variables, false)?,
+                    None => {
+                        let r = self.allocate_register()?;
+                        self.code.u8(op::LOAD_INT).u8(r).i64(0);
+                        r
+                    }
+                };
+                let destination = self.allocate_register()?;
+                let module_atom = self.atoms.intern(module);
+                let function_atom = self.atoms.intern(fname);
+                self.code
+                    .u8(op::SPAWN_EXT)
+                    .u8(destination)
+                    .u32(module_atom)
+                    .u32(function_atom)
+                    .u8(argument);
+                Ok(destination)
+            }
+            // `monitor(pid)` (lowered as erlang:monitor(process, Pid)): the
+            // watched process's death delivers {'DOWN', Ref, Pid, Reason}.
+            ("monitor", [CoreExpr::Lit(CoreLit::Atom(kind)), target]) if kind == "process" => {
+                let target = self.compile_expr(target, variables, false)?;
+                let destination = self.allocate_register()?;
+                self.code.u8(op::MONITOR).u8(destination).u8(target);
+                Ok(destination)
+            }
             _ => self.unsupported(&format!("erlang:{name}/{}", arguments.len())),
         }
     }
@@ -1103,6 +1224,14 @@ impl<'a> FunctionCompiler<'a> {
                 }
             }
             CorePattern::Cons(head, tail) => {
+                // HEAD/TAIL trap on non-cons values, but a failed pattern
+                // must fall through to the next clause. Lists are cons|nil in
+                // typed code, so a nil guard makes the destructure total —
+                // without it, `[13, 10 | _]` against `[13]` kills the process.
+                let nil = self.compile_literal(&CoreLit::Nil)?;
+                let is_nil = self.allocate_register()?;
+                self.code.u8(op::CMP_EQ).u8(is_nil).u8(value).u8(nil);
+                self.code.u8(op::JMP_IF).u8(is_nil).label_ref(fail);
                 let head_value = self.allocate_register()?;
                 let tail_value = self.allocate_register()?;
                 self.code.u8(op::HEAD).u8(head_value).u8(value);

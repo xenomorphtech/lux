@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 /// Source location tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {

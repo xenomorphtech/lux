@@ -1,5 +1,7 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::codegen::erlang::*;
-use std::fmt::Write;
+use core::fmt::Write;
 
 pub struct Emitter {
     output: String,
@@ -39,7 +41,7 @@ impl Emitter {
 
         writeln!(&mut self.output, "end").unwrap();
 
-        std::mem::take(&mut self.output)
+        core::mem::take(&mut self.output)
     }
 
     fn emit_fundef(&mut self, func: &CoreFunDef) {

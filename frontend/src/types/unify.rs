@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::syntax::span::Span;
 use crate::types::types::{Substitution, TyVar, Type};
 
@@ -21,8 +23,27 @@ pub enum TypeError {
     NotARecord(Type, Span),
 }
 
-impl std::fmt::Display for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl TypeError {
+    /// The source span the error is anchored to (byte offsets into the
+    /// expanded source). Every variant carries one.
+    pub fn span(&self) -> Span {
+        match self {
+            TypeError::Mismatch(_, _, s, _)
+            | TypeError::InfiniteType(_, _, s)
+            | TypeError::ArityMismatch(_, _, s)
+            | TypeError::NonExhaustiveMatch(_, s)
+            | TypeError::RedundantMatchArm(s)
+            | TypeError::UnboundVariable(_, s)
+            | TypeError::UnboundType(_, s)
+            | TypeError::FieldNotFound(_, s)
+            | TypeError::NotAFunction(_, s)
+            | TypeError::NotARecord(_, s) => *s,
+        }
+    }
+}
+
+impl core::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             TypeError::Mismatch(t1, t2, _, context) => {
                 write!(f, "Type mismatch: expected {:?}, found {:?}", t1, t2)?;
@@ -71,7 +92,7 @@ impl std::fmt::Display for TypeError {
     }
 }
 
-impl std::error::Error for TypeError {}
+impl core::error::Error for TypeError {}
 
 impl TypeError {
     pub fn with_mismatch_context(

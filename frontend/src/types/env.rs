@@ -1,5 +1,7 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::types::types::{Scheme, Substitution, TyVar, Type};
-use std::collections::HashMap;
+use crate::collections::HashMap;
 
 /// Type environment mapping names to type schemes
 #[derive(Debug, Clone, Default)]
@@ -48,8 +50,8 @@ impl TypeEnv {
     }
 
     /// Get all free type variables in the environment
-    pub fn free_vars(&self) -> std::collections::HashSet<TyVar> {
-        let mut vars = std::collections::HashSet::new();
+    pub fn free_vars(&self) -> crate::collections::HashSet<TyVar> {
+        let mut vars = crate::collections::HashSet::new();
         for scheme in self.bindings.values() {
             let scheme_vars = free_vars_in_type(&scheme.ty);
             for v in scheme_vars {
@@ -96,13 +98,13 @@ impl TypeEnv {
 }
 
 /// Get free type variables in a type
-pub fn free_vars_in_type(ty: &Type) -> std::collections::HashSet<TyVar> {
-    let mut vars = std::collections::HashSet::new();
+pub fn free_vars_in_type(ty: &Type) -> crate::collections::HashSet<TyVar> {
+    let mut vars = crate::collections::HashSet::new();
     collect_free_vars(ty, &mut vars);
     vars
 }
 
-fn collect_free_vars(ty: &Type, vars: &mut std::collections::HashSet<TyVar>) {
+fn collect_free_vars(ty: &Type, vars: &mut crate::collections::HashSet<TyVar>) {
     match ty {
         Type::Var(v) => {
             vars.insert(*v);

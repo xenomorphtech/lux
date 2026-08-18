@@ -1,5 +1,2 @@
 pub mod cranelift;
-pub mod emit;
-pub mod erlang;
-pub mod translate;
-pub mod yggdrasil;
+pub use lux_frontend::codegen::{emit, erlang, translate, yggdrasil};

@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::syntax::span::Span;
 
 #[derive(Debug, Clone, PartialEq)]

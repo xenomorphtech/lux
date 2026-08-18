@@ -1,8 +1,10 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::codegen::emit::Emitter;
 use crate::codegen::erlang::*;
 use crate::syntax::ast::{self, Expr, InterpolatedPart, Item, Module, Pattern, Stmt};
 use crate::syntax::content_address;
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet};
 
 const ARTIFACT_HASH_SCHEMA: &str = "lux-artifact-v2";
 const BUILD_KEY_SCHEMA: &str = "lux-build-v1";

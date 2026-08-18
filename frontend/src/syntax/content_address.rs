@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use sha2::{Digest, Sha256};
 
 fn hex_encode(bytes: &[u8]) -> String {

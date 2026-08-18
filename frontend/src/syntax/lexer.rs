@@ -1,9 +1,11 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::syntax::span::Span;
 use crate::syntax::token::{StringPart, Token, TokenKind};
 
 pub struct Lexer<'a> {
     source: &'a str,
-    chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    chars: core::iter::Peekable<core::str::CharIndices<'a>>,
     pos: usize,
 }
 
@@ -338,7 +340,7 @@ impl<'a> Lexer<'a> {
                         // Found interpolation
                         has_interpolation = true;
                         if !current.is_empty() {
-                            parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                            parts.push(StringPart::Literal(core::mem::take(&mut current)));
                         }
                         self.advance(); // $
                         self.advance(); // {

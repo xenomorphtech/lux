@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use lux_frontend::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -357,7 +357,7 @@ impl LiveCodeService {
         config: SessionConfig,
         resolved_symbols: &HashMap<(String, usize), String>,
     ) -> Result<CompiledPackage, ServiceError> {
-        let mut session = Session::with_config(std::path::PathBuf::new(), config);
+        let mut session = Session::with_config(config);
         let module = session.compile_source(source)?;
         let source_module = module.name.clone().unwrap_or_else(|| "main".to_string());
 

@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::syntax::ast::{CatchArm, Generator, *};
 use crate::syntax::span::Span;
 use crate::syntax::token::{StringPart, Token, TokenKind};
@@ -20,7 +22,17 @@ pub struct Parser {
     /// True if we just skipped a newline
     after_newline: bool,
     options: ParserOptions,
+    /// Current expression/type nesting depth. Recursion in this parser is
+    /// proportional to it, and embedders (the in-kernel compiler runs on a
+    /// fixed stack with panic=abort) need a clean error instead of stack
+    /// exhaustion on hostile nesting.
+    depth: u32,
 }
+
+/// Deeper than any real program (operator chains parse iteratively, so this
+/// only counts genuine nesting); shallow enough that parsing, inference and
+/// translation stay bounded even on a 2 MiB stack in debug builds.
+const MAX_NESTING_DEPTH: u32 = 64;
 
 pub type ParseResult<T> = Result<T, ParseError>;
 
@@ -51,6 +63,7 @@ impl Parser {
             pending_type_gt: 0,
             after_newline: false,
             options,
+            depth: 0,
         }
     }
 
@@ -188,6 +201,19 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> ParseResult<TypeExpr> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(ParseError::new(
+                format!("type nesting exceeds {MAX_NESTING_DEPTH} levels"),
+                self.current_span(),
+            ));
+        }
+        self.depth += 1;
+        let r = self.parse_type_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_type_inner(&mut self) -> ParseResult<TypeExpr> {
         let start = self.current_span();
 
         // Function type: fn(A, B) -> C
@@ -524,7 +550,16 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> ParseResult<Expr> {
-        self.parse_pipe_expr()
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(ParseError::new(
+                format!("expression nesting exceeds {MAX_NESTING_DEPTH} levels"),
+                self.current_span(),
+            ));
+        }
+        self.depth += 1;
+        let r = self.parse_pipe_expr();
+        self.depth -= 1;
+        r
     }
 
     fn parse_pipe_expr(&mut self) -> ParseResult<Expr> {
@@ -1635,12 +1670,12 @@ impl Parser {
     }
 
     fn check(&mut self, kind: &TokenKind) -> bool {
-        std::mem::discriminant(self.peek()) == std::mem::discriminant(kind)
+        core::mem::discriminant(self.peek()) == core::mem::discriminant(kind)
     }
 
     /// Check without skipping newlines
     fn check_no_skip(&self, kind: &TokenKind) -> bool {
-        std::mem::discriminant(self.peek_no_skip()) == std::mem::discriminant(kind)
+        core::mem::discriminant(self.peek_no_skip()) == core::mem::discriminant(kind)
     }
 
     fn advance(&mut self) -> &Token {

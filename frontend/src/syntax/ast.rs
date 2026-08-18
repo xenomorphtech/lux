@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::prelude::*;
 use crate::syntax::span::Span;
 
 pub type Ident = String;

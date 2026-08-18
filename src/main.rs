@@ -275,7 +275,7 @@ fn main() {
     let store = open_store(&workspace_dir, &db_path);
     let mut service = LiveCodeService::new(store);
 
-    let package = match service.compile_source(&source, config, &std::collections::HashMap::new()) {
+    let package = match service.compile_source(&source, config, &lux_frontend::collections::HashMap::new()) {
         Ok(package) => package,
         Err(err) => {
             print_service_error(err);
@@ -384,7 +384,7 @@ fn compile_yggdrasil(source: &str, filename: &str, sandbox: bool, artifacts_dir:
     } else {
         SessionConfig::trusted()
     };
-    let mut session = Session::with_config(PathBuf::new(), config);
+    let mut session = Session::with_config(config);
     let module = match session.compile_source(source) {
         Ok(module) => module,
         Err(error) => {
@@ -480,7 +480,7 @@ fn compile_native(source: &str, filename: &str, sandbox: bool, artifacts_dir: &P
     };
 
     // Parse and type-check
-    let mut session = Session::with_config(PathBuf::new(), config);
+    let mut session = Session::with_config(config);
     let module = match session.compile_source(source) {
         Ok(m) => m,
         Err(err) => {

@@ -240,7 +240,7 @@ impl ApiServer {
             }
             None => self
                 .service
-                .compile_source(source, config, &std::collections::HashMap::new()),
+                .compile_source(source, config, &lux_frontend::collections::HashMap::new()),
         }
     }
 

@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+#[allow(unused_imports)]
+use crate::prelude::*;
+use crate::collections::HashMap;
 
 /// Type variable identifier
 pub type TyVar = u32;
